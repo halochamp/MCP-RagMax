@@ -1,7 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 from __future__ import annotations
 import re
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -13,9 +9,9 @@ def _has_thai(text: str) -> bool:
 
 
 def _clean(text: str) -> str:
-    # Remove transcript timestamps only when bracketed or at the start of a
-    # line.  A bare time-like token inside prose may be a ratio, market time,
-    # or other meaningful data and must not be stripped silently.
+    # Remove transcript timestamps only when bracketed or leading a line.
+    # A bare time-like token inside prose may be a ratio, market time, or other
+    # meaningful data and must not be stripped silently.
     text = re.sub(r"\[\d{1,2}:\d{2}(?::\d{2})?\]", "", text)
     text = re.sub(r"(?m)^\s*\d{1,2}:\d{2}(?::\d{2})?\s*", "", text)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -29,8 +25,6 @@ def _pack_words(words: list[str], chunk_size: int, overlap: int) -> list[str]:
     window_len = 0
     for word in words:
         wlen = len(word)
-        # RecursiveCharacterTextSplitter also hard-bounds unbroken tokens;
-        # keep the Thai path subject to the same invariant.
         if wlen > chunk_size:
             if window:
                 chunks.append("".join(window))

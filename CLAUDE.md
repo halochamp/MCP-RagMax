@@ -1,11 +1,11 @@
-# ENDEAVOR_RAG_LITE project rules
+# MCP-RagMax public project rules
 
-- This public repository is self-contained; do not depend on a private parent repository.
-- Read [`AGENT.md`](AGENT.md) and [`AGENT_PROCEDURE.md`](AGENT_PROCEDURE.md) before substantial work.
-- Preserve the three-pipe architecture: Pipe A is the standalone RAG app, Pipe B is `rag_retrieve`, Pipe C is a thin stdio MCP adapter that delegates to Pipe B.
-- Pipe C must remain read-only, expose only `rag_retrieve`, validate input before retrieval, serialize calls as designed, cap output, and never import/start Pipe A or a second LLM/retrieval implementation.
-- Keep the MLX server local (`127.0.0.1`) and do not put the stdio MCP adapter behind a public network endpoint without a deliberate authentication/policy redesign.
-- Preserve workspace/state confinement and do not commit `.venv/`, `workspace/.rag_state/`, model caches, logs, screenshots, credentials, private documents, or personal absolute paths.
-- Changes to configuration, ingestion, retrieval, path confinement, Pipe C, or tool behavior require deterministic regression coverage.
-- Standard deterministic suite: `python -m pytest tests -q`.
-- Keep live-model tests separate from deterministic retrieval/protocol tests.
+- This public repository is self-contained; never depend on a private parent repository or sibling agent.
+- Read `AGENT.md` and `AGENT_PROCEDURE.md` before substantial work.
+- MCP-RagMax is an LLM-free RAG backend: search, expansion, ranking, build decisions, validation, and writes remain deterministic.
+- Preserve the nine-tool stdio MCP surface documented in README; do not add shell/Python/arbitrary-path tools.
+- Source reads are confined to the configured `workspace/knowledge/` root. Derived state belongs under `workspace/.rag_state/` and is never committed.
+- The HTML UI binds only to `127.0.0.1`; do not expose it to LAN/public networks without a new auth/policy design.
+- `rag_rebuild_index` may accept caller-LLM topic labels only through the guarded prepare/commit fingerprint protocol; backend metadata remains deterministic truth.
+- Preserve persistent build jobs, cooperative cancellation, Chroma/BM25 consistency, registry atomicity, and pipeline fingerprint checks.
+- Add/update deterministic regression coverage for changes. Never commit private documents, indexes, caches, logs, credentials, screenshots, or personal absolute paths.

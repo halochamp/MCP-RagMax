@@ -1,230 +1,199 @@
-# ENDEAVOR_RAG
+# MCP-RagMax
 
-ค้นหาความรู้ของคุณให้พบ — ด้วย RAG ภาษาไทยและอังกฤษที่ทำงานบน Mac ของคุณเอง
+## Local deterministic RAG backend สำหรับเอกสารไทย/อังกฤษ
 
-ENDEAVOR_RAG เปลี่ยนโฟลเดอร์เอกสารส่วนตัวให้เป็น knowledge base ที่พร้อมตอบคำถาม
-อย่างมีบริบท ไม่ว่าจะเป็นนโยบายบริษัท โน้ตวิจัย คู่มือการทำงาน รายงาน PDF หรือ
-ข้อมูล CSV/JSON ทุกอย่างตั้งแต่เอกสาร ดัชนี ไปจนถึง model server ทำงานแบบ
-local-first บน Apple Silicon
+MCP-RagMax คือ RAG backend ที่ทำงานบนเครื่องและเปิดให้ agent อื่นเรียกผ่าน MCP โดย **ตัว backend ไม่ใช้ LLM** สำหรับ search, query expansion, reranking, build decisions, metadata validation หรือ file writes
 
-สร้างครั้งเดียว แล้วเลือกใช้ได้สามทางจาก knowledge base เดียวกัน:
+โปรเจกต์นี้เข้ามาแทน architecture เดิมของ `ENDEAVOR_RAG_LITE` ใน repository นี้ โดยคงจุดเด่นของ public release คือ clone แล้วทำงานได้เอง ไม่ต้องพึ่ง private monorepo หรือ agent อื่น
 
-- **Pipeline A — Chat with your knowledge:** เปิด Terminal agent เพื่อถาม ค้นหา
-  เปิดอ่านไฟล์ และบันทึกสิ่งที่อยากจำ
-- **Pipeline B — Bring RAG to your agent:** ให้ agent ที่คุณสร้างเองเรียก
-  `rag_search` และ tools ของ ENDEAVOR_RAG เพื่อใช้ retrieval ที่พร้อมอยู่ในงานของคุณ
-- **Pipe C — Connect through MCP:** ให้ MCP client ใช้ retrieval และ read-only
-  KB inspection (`rag_retrieve`, `rag_list`, `rag_search_files`, `rag_read_file`,
-  `rag_health`) ผ่าน stdio โดยไม่เปิดหรือเรียก Pipeline A LLM
+### สิ่งที่ได้
 
-## Why ENDEAVOR_RAG
+- Hybrid retrieval: multilingual MiniLM dense search + Thai-aware BM25 + Reciprocal Rank Fusion (RRF)
+- Incremental KB build พร้อม file registry, exact-hash dedup และ deterministic semantic duplicate rejection
+- Persistent background build jobs พร้อม progress, ETA และ cooperative cancellation
+- MCP stdio 9 tools สำหรับ retrieval, file access ภายใน KB, build, health และ orientation index
+- `rag_index.json` lifecycle แบบ prepare/commit: caller LLM ช่วยเสนอได้เฉพาะ topic labels ส่วน counts/tags/source types/fingerprint เป็น backend truth
+- Local HTML RAG console ที่ `127.0.0.1:8770`
+- Source confinement: อ่านไฟล์ได้เฉพาะใต้ `workspace/knowledge/`
+- Derived state ทั้งหมดอยู่ใต้ `workspace/.rag_state/` และถูก ignore จาก Git
 
-- **สร้างมาเพื่อภาษาไทยและอังกฤษ** — Thai-aware chunking, multilingual embeddings
-  และ BM25 ที่ตัดคำไทย
-- **ค้นหาอย่างมีหลักฐาน** — ผสาน dense retrieval กับ BM25 ผ่าน Reciprocal Rank
-  Fusion (RRF) ก่อนคืน context พร้อม source
-- **ข้อมูลอยู่กับคุณ** — knowledge root, index, logs และ memory อยู่ในเครื่อง
-- **ใช้ได้ทั้งคนและ agent** — เริ่มจาก Terminal ได้ทันที หรือนำ tool ไปต่อกับ
-  LangGraph/LangChain agent ของคุณ
-- **ดูแล index ได้ง่าย** — สร้างซ้ำได้, ตรวจสุขภาพได้, และ sync เอกสารที่เพิ่ม
-  เปลี่ยน หรือลบออกได้
+## Architecture
 
-```mermaid
-flowchart LR
-    D[Your documents] --> I[Thai-aware ingestion]
-    I --> K[Private knowledge base]
-    K --> R[Dense + BM25 + RRF]
-    R --> A[Pipeline A\nTerminal agent]
-    R --> B[Pipe B\nrag_retrieve API]
-    C[Pipe C\nMCP stdio adapter] --> B
+```text
+MCP client ──stdio──► mcp_server.py ───────────────┐
+                                                    │
+Browser ──127.0.0.1:8770──► web_ui.py ────────────┤
+                                                    ▼
+                                  deterministic RAG core
+                           MiniLM + BM25 + RRF + registry
+                                                    │
+                           workspace/.rag_state/ (derived)
+                                                    ▲
+                           workspace/knowledge/ (source)
 ```
 
-## Get started
+Backend ไม่มี chat agent และไม่ start local/cloud LLM เอง
 
-ENDEAVOR_RAG ต้องการ macOS บน Apple Silicon และ Python 3.11
+## MCP tools
+
+MCP catalog มี 9 tools:
+
+1. `rag_retrieve` — Dense + BM25 + RRF retrieval; รองรับ same-intent query variants และ filters
+2. `rag_list` — แสดงไฟล์ที่ register อยู่ใน KB
+3. `rag_search_files` — ค้น filename แบบ deterministic
+4. `rag_read_file` — อ่านไฟล์ที่ register แล้วเท่านั้น
+5. `build_kb` — เริ่ม background KB build และคืน persistent `job_id`
+6. `build_status(job_id)` — ดู phase/progress/ETA
+7. `cancel_build(job_id)` — ขอ cooperative cancellation
+8. `rag_rebuild_index` — `prepare` context หรือ `commit` caller topics ด้วย fingerprint protection
+9. `rag_health` — ตรวจ Chroma/BM25/registry/pipeline/orientation/job health
+
+MCP ไม่ expose shell, Python execution หรือ arbitrary filesystem read
+
+## เริ่มใช้งาน
+
+### 1. ติดตั้ง
 
 ```bash
+cd ENDEAVOR_RAG_LITE
 bash install_library/install.sh
 source .venv/bin/activate
+```
+
+Installer ติดตั้ง dependency เท่านั้น ไม่ scan files, ไม่ build index และไม่ start model
+
+### 2. ใส่เอกสาร
+
+วางไฟล์ไว้ใต้:
+
+```text
+workspace/knowledge/
+```
+
+รองรับ `.md`, `.txt`, `.pdf`, `.csv`, `.json`
+
+### 3. ตรวจ environment
+
+```bash
 python tools/doctor.py
 ```
 
-วางเอกสาร `.md`, `.txt`, `.pdf`, `.csv` หรือ `.json` ไว้ใน
-`workspace/knowledge/` แล้วสร้าง index:
+### 4. Build KB
+
+แบบ foreground:
 
 ```bash
 python tools/build_index.py
 ```
 
-จากนั้นเลือก workflow ที่เหมาะกับคุณ
+หรือผ่าน MCP ใช้ `build_kb` แล้ว poll ด้วย `build_status`
 
-## Pipeline A — Your private knowledge assistant
-
-เปิด agent แล้วเริ่มคุยกับเอกสารของคุณได้ทันที:
+### 5. เปิด HTML UI
 
 ```bash
 python main.py
 ```
 
-Pipeline A เป็น Terminal ReAct agent ที่ใช้ local MLX model และเลือก tool ให้ตาม
-เจตนาของคำถาม:
+แล้วเปิด `http://127.0.0.1:8770`
 
-| คุณอยากทำอะไร | Agent ใช้อะไร |
-|---|---|
-| ถามเนื้อหาในเอกสาร | `rag_search` |
-| ดูภาพรวม knowledge base | `list_knowledge` |
-| หาเอกสารจากชื่อไฟล์ | `search_files` |
-| เปิดอ่านเอกสาร | `read_file` |
-| บันทึกสิ่งที่อยากจำ | `save_memory` |
+หรือบน macOS double-click `Start MCP-RagMax UI.command`
 
-เมื่อเริ่ม `main.py` ระบบจะเตรียม embedding model และ local MLX server ให้พร้อมใช้
-บน `127.0.0.1:8092` ตามค่าตั้งต้น
+UI ใช้สำหรับ search, health, file list, build/progress/cancel และ rag-index prepare/commit; ไม่ใช่ chat UI
 
-## Pipeline B — Retrieval for the agent you already have
+## MCP launch
 
-มี agent ของตัวเองอยู่แล้ว? นำ ENDEAVOR_RAG เข้าไปเป็น knowledge tool ได้โดยตรง
-Pipeline B ให้คุณใช้ retrieval pipeline เดียวกับ Pipeline A ใน LangGraph หรือ
-LangChain workflow ของคุณ พร้อม query expansion, dense search, Thai BM25, RRF,
-parent-context retrieval และ local reranking
+ตัวอย่างการเปิด stdio server:
 
-```python
-from langgraph.prebuilt import create_react_agent
-
-from llm_client import build_llm
-from rag_search import rag_search
-
-agent = create_react_agent(
-    build_llm(),
-    tools=[rag_search],
-    prompt=(
-        "Search the local knowledge base when needed. "
-        "Answer from returned context and cite its sources."
-    ),
-)
-
-result = agent.invoke({
-    "messages": [{"role": "user", "content": "สรุปนโยบายการลาคืออะไร"}]
-})
+```bash
+source .venv/bin/activate
+python mcp_server.py
 ```
 
-หรือให้ orchestrator เรียก retrieval tool โดยตรง:
+MCP host ควร launch process นี้เป็น local stdio child process
 
-```python
-from rag_search import rag_search
+## Retrieval
 
-context = rag_search.invoke({"query": "เงื่อนไขการลางาน"})
-print(context)
-```
-
-`rag_search` คืน parent context ที่เกี่ยวข้องพร้อม `SOURCES:` ให้ agent ของคุณ
-นำไปสังเคราะห์คำตอบต่อได้อย่างโปร่งใส คุณยังเลือกเพิ่ม `list_knowledge`,
-`search_files`, `read_file` และ `save_memory` เป็น tools ของ agent ได้ตาม workflow
-
-## Pipe C — MCP adapter for external clients
-
-Pipe C (`mcp_server.py`) เป็นชั้น protocol บาง ๆ สำหรับ MCP client ที่ต้องการใช้
-retrieval ของ ENDEAVOR_RAG จากโปรเซสอื่น:
+Search pipeline:
 
 ```text
-MCP client/agent → Pipe C (stdio) → Pipe B (rag_retrieve) → retriever/index
-                              └→ shared KB operations → registry/files/health
+query normalization
+  → multilingual MiniLM embedding
+  → Thai-aware BM25
+  → RRF fusion
+  → deterministic unique-parent selection
 ```
 
-Pipe C มี 5 read-only tools:
+Caller สามารถส่ง query variants ได้สูงสุดตาม schema แต่ต้องเป็น **same intent** ไม่ใช่ subquestions ใหม่ Backend จะ retrieve แต่ละ variant แบบ deterministic เหมือนเดิม
 
-- `rag_retrieve` — semantic retrieval ผ่าน Pipeline B (Dense + BM25 + RRF)
-- `rag_list` — ดูรายการไฟล์ที่ register ใน knowledge base แบบแบ่งหน้า
-- `rag_search_files` — ค้นชื่อไฟล์แบบ case-insensitive
-- `rag_read_file` — อ่านเฉพาะไฟล์ที่ register อยู่และอยู่ใต้ configured knowledge root
-- `rag_health` — ตรวจ Chroma/BM25/registry health
+## Build และ cancellation
 
-`rag_retrieve` คง semantics ของ Pipe B เดิมไว้ ได้แก่ `query` แบบข้อความเดียวหรือ
-query variants สูงสุด 8 รายการ, `mode` (`chunks`, `files`, `source_first`) และตัวกรอง
-ต่าง ๆ โดยมีกฎสำคัญว่า query variants ทุกตัวต้องเป็น **คำถามเดียวกัน (SAME question)**
-และรักษา intent เดิม ตัวอย่างที่เหมาะสมคือประโยคไทยต้นฉบับ, คำถามเดียวกันภาษาอังกฤษ,
-keyword ไทย และ keyword อังกฤษของคำถามเดิม ห้ามใช้ variants เพื่อเพิ่ม subquestion,
-มุมที่แคบลง, assumption ใหม่ หรือหัวข้อที่เพียงเกี่ยวข้องกัน เพราะแต่ละ variant จะถูก
-ค้นแยกด้วย Dense + BM25 แล้วรวมอันดับด้วย RRF
+`build_kb` สแกน `workspace/knowledge/` แล้ว process new/changed files เท่านั้น Registry, Chroma และ BM25 มี consistency/rollback guards
 
-Pipe C ตรวจชนิดข้อมูลและขนาด, serialize access ที่แตะ Chroma/BM25, จำกัดผลลัพธ์ที่
-50,000 ตัวอักษร และแปลง backend error เป็น error ทั่วไปโดยไม่ส่งรายละเอียด path หรือ
-traceback ออกไป ทั้ง 5 tools ไม่ import หรือเรียก `main.py`, `rag_search.py` หรือ
-`llm_client.py` จึงไม่เปิด Pipeline A และไม่ใช้ generative LLM เพิ่ม การเริ่ม server
-ใช้ stdio เท่านั้นและไม่เปิด network port:
+- new file: cancellation สามารถหยุดกลาง ingest และ rollback partial writes
+- changed file: เมื่อเริ่ม replace old rows แล้ว จะ finish file ปัจจุบันก่อน honoring cancellation เพื่อลดช่วงที่ source หายจาก index
+- job state อยู่ใน `workspace/.rag_state/build_jobs/` จึง poll/cancel ต่อได้แม้ MCP stdio process เดิมปิดไปแล้ว
 
-```bash
-# Run from the repository root after installation
-python mcp_server.py
+## `rag_index.json` และ caller LLM
 
-# Register with a local MCP host that supports stdio
-codex mcp add endeavor-rag -- "$PWD/.venv/bin/python" "$PWD/mcp_server.py"
-```
+MCP-RagMax ไม่เรียก LLM เอง แต่ caller agent อาจใช้ LLM ของตัวเองช่วยสร้าง high-level topics ผ่าน protocol ที่จำกัด:
 
-ผลลัพธ์ของ Pipe B มี absolute path สำหรับให้ client ไปอ่าน source ต่อ ดังนั้นควร
-ลงทะเบียน Pipe C กับ MCP host ที่เชื่อถือได้บนเครื่องเดียวกันเท่านั้น อย่านำ stdio
-adapter ไปวางหลัง public network endpoint โดยไม่ออกแบบ authentication และ policy
-สำหรับการเปิดเผย path ใหม่
+1. `rag_rebuild_index(mode="prepare")` คืน bounded deterministic snapshot + `expected_fingerprint`
+2. caller สร้าง topic labels 1–30 รายการจาก snapshot
+3. `rag_rebuild_index(mode="commit", topics=..., expected_fingerprint=...)`
+4. backend validate topics, recompute metadata และ recheck fingerprint ก่อน atomic install
 
-## Built for your documents
+ถ้า KB เปลี่ยนระหว่าง prepare/commit จะ fail ด้วย conflict และไม่ทับ index ที่ดีอยู่เดิม
 
-เอกสารทุกชิ้นอยู่ใต้ knowledge root ที่คุณกำหนด และระบบเก็บ runtime state แยกไว้ที่
-`workspace/.rag_state/`:
+Public port เก็บ orientation file ที่ `workspace/.rag_state/rag_index.json` แทนการสร้าง tracked runtime file ใน repository
 
-- Chroma vector index
-- BM25 index
-- file registry และ index health data
-- local logs และ persistent memory
+## Configuration
 
-การสร้าง index ซ้ำจะจัดการไฟล์ที่เปลี่ยนแปลงให้โดยอัตโนมัติ คุณจึงอัปเดต knowledge
-base ได้ต่อเนื่องโดยใช้คำสั่งเดิม:
-
-```bash
-python tools/build_index.py
-```
-
-## Configure your workspace
-
-กำหนดทุกอย่างผ่าน environment variables โดยไม่ต้องแก้ source code:
-
-| ตัวแปร | ค่าเริ่มต้น | ใช้สำหรับ |
+| Environment variable | Default | ความหมาย |
 |---|---|---|
-| `RAGMAX_WORKSPACE` | `workspace/` | workspace หลัก |
-| `RAGMAX_KNOWLEDGE_DIR` | `workspace/knowledge/` | โฟลเดอร์เอกสาร |
-| `RAGMAX_STATE_DIR` | `workspace/.rag_state/` | index, registry, logs และ memory |
-| `RAGMAX_MLX_HOST` | `127.0.0.1` | local MLX server |
-| `RAGMAX_MLX_PORT` | `8092` | port ของ MLX server |
-| `RAGMAX_MLX_MODEL` | Qwen3.5-2B-OptiQ-4bit | model สำหรับตอบและ rerank |
-| `RAGMAX_NO_AUTO_START` | ไม่ตั้งค่า | ควบคุมการเปิด server อัตโนมัติ |
+| `RAGMAX_WORKSPACE` | `workspace/` | workspace root |
+| `RAGMAX_KNOWLEDGE_DIR` | `workspace/knowledge/` | source document root |
+| `RAGMAX_STATE_DIR` | `workspace/.rag_state/` | derived private state |
+| `RAGMAX_UI_PORT` | `8770` | local UI port |
+| `RAGMAX_FAKE_EMBEDDINGS` | unset | test-only deterministic embedding path |
 
-ตัวอย่าง workspace บนดิสก์อื่น:
+`RAGMAX_KNOWLEDGE_DIR` สามารถชี้ไป directory อื่นที่ผู้ใช้เลือกเองได้ แต่ทุก source path ที่ backend เปิดต้อง resolve อยู่ภายใน root นี้; symlink/path traversal ที่หนี root จะถูกปฏิเสธ
+
+## Privacy & security
+
+- UI bind ที่ `127.0.0.1` เท่านั้น
+- MCP ใช้ stdio สำหรับ trusted local host
+- `rag_read_file` อ่านได้เฉพาะ registered file ใน configured knowledge root
+- ไม่มี shell/Python/arbitrary path MCP tools
+- user documents และ generated state ไม่ถูก commit
+- ไม่มี cloud LLM call ใน backend
+
+หากต้องการ expose ผ่าน LAN/Internet ต้องออกแบบ authentication, authorization, request limits และ privacy policy ใหม่ ไม่ควรเปลี่ยน host flag อย่างเดียว
+
+## Testing
+
+Deterministic suite แบบเดียวกับ private MCP-RagMax:
 
 ```bash
-export RAGMAX_WORKSPACE="$PWD/my_rag_workspace"
-export RAGMAX_KNOWLEDGE_DIR="$RAGMAX_WORKSPACE/knowledge"
-export RAGMAX_STATE_DIR="$RAGMAX_WORKSPACE/.rag_state"
-python tools/build_index.py
+python tests/run_all.py
 ```
 
-## Verify with confidence
+และ public packaging regression:
 
 ```bash
-python tools/doctor.py
-python tools/doctor.py --check-server
 python -m pytest tests -q
 ```
 
-ชุดทดสอบ deterministic ใช้ temporary state และ fake embeddings จึงรันได้โดยไม่
-กระทบ index ของคุณ และ `_test_mcp_pipe_c.py` ตรวจ catalog, C→B delegation,
-validation, error mapping, output cap และ stdio handshake โดยไม่ต้องโหลด model
+Test suite ครอบคลุม chunking, dense/BM25/RRF, registry lifecycle, deterministic dedup, dual-store rollback, cancellation, persistent jobs, 9-tool MCP schema/handshake, caller-assisted rag index และ loopback Web UI
 
-## Privacy by design
+## System requirements
 
-ENDEAVOR_RAG เก็บเอกสาร paths, index และ memory ไว้ในเครื่อง และ local UI/MLX
-server ใช้ `127.0.0.1` ตามค่าเริ่มต้น โปรดเก็บ credentials, private keys และ
-ข้อมูลอ่อนไหวออกจาก prompt, issue และ repository
+- macOS on Apple Silicon
+- Python 3.11
+- RAM/disk เพียงพอสำหรับ local embedding model และ Chroma index
+- internet ครั้งแรกที่ต้อง download embedding model หากยังไม่มี cache
 
-## License and contributing
+Retrieval model default คือ `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`; model weights ไม่ได้ถูกเก็บใน repository
 
-ENDEAVOR_RAG เผยแพร่ภายใต้ MIT License ดูรายละเอียดที่
-[`LICENSE`](LICENSE), [`SECURITY.md`](SECURITY.md) และ
-[`CONTRIBUTING.md`](CONTRIBUTING.md)
+## Repository migration note
+
+ชื่อ GitHub repository เดิมคือ `ENDEAVOR_RAG_LITE` แต่ runtime architecture ปัจจุบันคือ **MCP-RagMax** และแทนที่ Pipe A/B/C แบบเก่าที่เคย expose MCP เพียง `rag_retrieve` tool เดียว

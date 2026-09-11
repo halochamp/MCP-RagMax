@@ -1,7 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 from __future__ import annotations
 import hashlib
 import os
@@ -9,12 +5,13 @@ import pickle
 import threading
 from contextlib import contextmanager
 import fcntl
+from pathlib import Path
+
+from config import BM25_PATH, CHROMA_DIR as DB_DIR
 
 import chromadb
 from rank_bm25 import BM25Okapi
 from pythainlp import word_tokenize
-
-from config import BM25_PATH, CHROMA_DIR as DB_DIR
 
 _chroma_client: chromadb.PersistentClient | None = None
 _collection: chromadb.Collection | None = None
@@ -37,7 +34,7 @@ def _get_collection() -> chromadb.Collection:
                 DB_DIR.mkdir(parents=True, exist_ok=True)
                 _chroma_client = chromadb.PersistentClient(path=str(DB_DIR))
                 _collection = _chroma_client.get_or_create_collection(
-                    name="ENDEAVOR_RAG",
+                    name="endeavor_rag",
                     metadata={"hnsw:space": "cosine"},
                 )
     return _collection
@@ -225,8 +222,7 @@ def health_check() -> list[str]:
     col = _get_collection()
     chunks = col.get(include=["metadatas"])
     chroma_ids = set(chunks["ids"])
-    valid_metadata = [m for m in chunks["metadatas"]
-                      if isinstance(m, dict) and "source" in m]
+    valid_metadata = [m for m in chunks["metadatas"] if isinstance(m, dict) and "source" in m]
     malformed_count = len(chunks["metadatas"]) - len(valid_metadata)
     if malformed_count:
         issues.append(f"{malformed_count} Chroma chunks have malformed source metadata")

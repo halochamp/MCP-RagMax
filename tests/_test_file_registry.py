@@ -1,7 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 """_test_file_registry.py — file_registry lifecycle + portability (_rel/_abs roundtrip)"""
 import os
 import tempfile
@@ -13,42 +9,38 @@ r = Runner("file_registry")
 
 
 def t11_registry():
-    from config import KNOWLEDGE_DIR
+    import config
     from file_registry import check, register, deregister
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        delete=False, suffix=".txt", mode="w", dir=KNOWLEDGE_DIR
-    ) as f:
-        f.write("hello")
-        path = f.name
-    assert check(path) == "new"
-    register(path)
-    assert check(path) == "skip"
-    with open(path, "w") as f:
-        f.write("changed content")
-    assert check(path) == "changed"
-    deregister(path)
-    assert check(path) == "new"
-    os.unlink(path)
+    config.KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+    path = config.KNOWLEDGE_DIR / "registry-lifecycle.txt"
+    path.write_text("hello", encoding="utf-8")
+    assert check(str(path)) == "new"
+    register(str(path))
+    assert check(str(path)) == "skip"
+    path.write_text("changed content", encoding="utf-8")
+    assert check(str(path)) == "changed"
+    deregister(str(path))
+    assert check(str(path)) == "new"
+    path.unlink(missing_ok=True)
 
 
-def t30_rel_abs_roundtrip_inside_base():
-    """A knowledge-root file round-trips through the portable registry key."""
-    from config import KNOWLEDGE_DIR
+def t30_rel_abs_roundtrip_inside_knowledge():
+    """_rel/_abs roundtrip is confined to the configured knowledge root."""
+    import config
     from file_registry import _rel, _abs
-    inside = KNOWLEDGE_DIR / "_portability_roundtrip_test.tmp"
-    inside.parent.mkdir(parents=True, exist_ok=True)
-    inside.write_text("x")
+    config.KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+    inside = config.KNOWLEDGE_DIR / "_portability_roundtrip_test.tmp"
+    inside.write_text("x", encoding="utf-8")
     try:
         key = _rel(str(inside))
-        assert not Path(key).is_absolute(), f"expected relative key, got {key}"
+        assert key == inside.name
         assert _abs(key) == str(inside.resolve())
     finally:
-        inside.unlink()
+        inside.unlink(missing_ok=True)
 
 
-def t31_rel_falls_back_to_abs_outside_base():
-    """Files outside the configured knowledge root are rejected."""
+def t31_rel_rejects_outside_knowledge():
+    """Public port rejects source paths outside the configured knowledge root."""
     from file_registry import _rel
     with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as f:
         outside = f.name
@@ -58,55 +50,50 @@ def t31_rel_falls_back_to_abs_outside_base():
         except ValueError:
             pass
         else:
-            raise AssertionError("outside path was accepted")
+            raise AssertionError("outside source path was accepted")
     finally:
         os.unlink(outside)
 
-
 def t46_pipeline_change_invalidates_unchanged_file():
-    import embedder
     import file_registry
-    from config import KNOWLEDGE_DIR
+    import pipeline_config
 
     saved = (
         file_registry.REGISTRY_PATH,
         file_registry._registry,
         file_registry._loaded,
         file_registry._fingerprint,
-        embedder.MODEL_NAME,
+        pipeline_config.EMBED_MODEL_NAME,
     )
-    path = None
     try:
-        KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            delete=False, suffix=".md", mode="w", dir=KNOWLEDGE_DIR
-        ) as f:
-            f.write("unchanged")
-            path = f.name
         with tempfile.TemporaryDirectory() as tmp:
-            file_registry.REGISTRY_PATH = Path(tmp) / "registry.json"
+            root = Path(tmp)
+            file_registry.REGISTRY_PATH = root / "registry.json"
             file_registry._registry = {}
             file_registry._loaded = False
             file_registry._fingerprint = None
-            file_registry.register(path)
-            assert file_registry.check(path) == "skip"
-            embedder.MODEL_NAME += "-new-vector-space"
-            assert file_registry.check(path) == "changed"
+            import config
+            path = config.KNOWLEDGE_DIR / "pipeline-change-doc.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("unchanged")
+            file_registry.register(str(path))
+            assert file_registry.check(str(path)) == "skip"
+            pipeline_config.EMBED_MODEL_NAME += "-new-vector-space"
+            assert file_registry.check(str(path)) == "changed"
+            assert file_registry.pipeline_outdated_count() == 1
     finally:
         (
             file_registry.REGISTRY_PATH,
             file_registry._registry,
             file_registry._loaded,
             file_registry._fingerprint,
-            embedder.MODEL_NAME,
+            pipeline_config.EMBED_MODEL_NAME,
         ) = saved
-        if path:
-            Path(path).unlink(missing_ok=True)
 
 
 r.test("T11 new/skip/changed/deregister", t11_registry)
-r.test("T30 knowledge-root _rel/_abs roundtrip", t30_rel_abs_roundtrip_inside_base)
-r.test("T31 outside path rejected", t31_rel_falls_back_to_abs_outside_base)
+r.test("T30 _rel/_abs roundtrip (inside knowledge)", t30_rel_abs_roundtrip_inside_knowledge)
+r.test("T31 _rel rejects outside knowledge", t31_rel_rejects_outside_knowledge)
 r.test("T46 pipeline/model change invalidates file", t46_pipeline_change_invalidates_unchanged_file)
 
 if __name__ == "__main__":

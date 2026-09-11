@@ -1,8 +1,4 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
-"""Terminal UI for ENDEAVOR_RAG."""
+"""ui.py — retained terminal presentation helpers for MCP-RagMax."""
 from __future__ import annotations
 import sys
 import threading

@@ -1,7 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 """Central progress callback — rag_search reports steps → spinner updates."""
 from __future__ import annotations
 from typing import Callable

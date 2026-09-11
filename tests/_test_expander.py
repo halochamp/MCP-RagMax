@@ -1,8 +1,4 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
-"""_test_expander.py — expander Thai detection, keyword extraction, contextualize, expand"""
+"""Deterministic query expansion tests — no LLM/network required."""
 from _runner import Runner
 
 r = Runner("expander")
@@ -35,26 +31,24 @@ def t21_contextualize():
     assert "RAG" in q
 
 
-def t22_translate():
-    from expander import _translate
-    result = _translate("RAG คืออะไร")
-    assert isinstance(result, str)
-    # may be empty if ollama unavailable — just no crash
-
-
-def t23_expand_returns_3():
-    from expander import expand
-    q1, q2, q3 = expand("machine learning คืออะไร")
-    assert isinstance(q1, str) and isinstance(q2, str) and isinstance(q3, str)
+def t22_expand_is_deterministic_and_llm_free():
+    import expander
+    assert not hasattr(expander, "_translate")
+    assert not hasattr(expander, "_llm_chat")
+    a = expander.expand("machine learning คืออะไร")
+    b = expander.expand("machine learning คืออะไร")
+    assert a == b
+    q1, q2, q3 = a
     assert q1 == "machine learning คืออะไร"
+    assert isinstance(q2, str) and isinstance(q3, str)
+    assert "machine" in q2 or "learning" in q2
 
 
 r.test("T18 _is_thai detection", t18_is_thai)
 r.test("T19 Thai keyword extract", t19_keywords_thai)
 r.test("T20 English keyword extract", t20_keywords_english)
 r.test("T21 contextualize connector word", t21_contextualize)
-r.test("T22 translate no crash", t22_translate)
-r.test("T23 expand returns 3 strings", t23_expand_returns_3)
+r.test("T22 deterministic no-LLM expand", t22_expand_is_deterministic_and_llm_free)
 
 if __name__ == "__main__":
     r.exit()

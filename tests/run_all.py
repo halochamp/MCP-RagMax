@@ -1,11 +1,7 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 """run_all.py — run every _test_*.py in rag_test_suite and report a combined result.
 
 Usage:
-    python run_all.py            (from rag_test_suite/ or ENDEAVOR_RAG/)
+    python run_all.py            (from rag_test_suite/ or MCP-RagMax/)
     python rag_test_suite/run_all.py
 """
 import subprocess

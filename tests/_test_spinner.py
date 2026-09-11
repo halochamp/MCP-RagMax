@@ -1,8 +1,4 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
-"""_test_spinner.py — check ENDEAVOR_RAG for the V2 B2 spinner bug class.
+"""_test_spinner.py — check MCP-RagMax for the V2 B2 spinner bug class.
 
 V2 B2 had two mechanisms:
   H4 (orphan race): a per-tool spinner (start/stop in a callback handler) got

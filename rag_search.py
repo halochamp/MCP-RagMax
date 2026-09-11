@@ -1,53 +1,29 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 from __future__ import annotations
+import json
 from pathlib import Path
 
+from config import MEMORY_PATH, source_path
 from langchain_core.tools import tool
 
-from config import MEMORY_PATH, source_path
 import retriever
 import kb_operations
 from expander import expand
-from llm_client import chat as _llm_chat
 
 MAX_CHUNKS    = 5   # child chunks sent to reranker
 KEEP_CHUNKS   = 3   # parent chunks returned
 QUALITY_HIGH  = 0.62
 QUALITY_LOW   = 0.35
 
+
 def _to_abs(s: str) -> str:
-    """Resolve and validate a source path inside the knowledge root."""
+    """Resolve and validate a source path inside the configured knowledge root."""
     return str(source_path(s))
 
 
 def _rerank(query: str, chunks: list[dict]) -> list[dict]:
-    """Ask LLM to select best 2-3 chunks by index. Returns selected chunks."""
-    if not chunks:
-        return []
-    if len(chunks) <= 2:
-        return chunks
-
-    numbered = "\n\n".join(
-        f"[{i+1}] {c['child_text'][:400]}" for i, c in enumerate(chunks)
-    )
-    prompt = (
-        f"Query: {query}\n\n{numbered}\n\n"
-        f"Which 2-3 chunks most directly answer the query? "
-        f"Reply with numbers only, e.g. '1, 3'"
-    )
-    try:
-        raw = _llm_chat(prompt, temperature=0.0, max_tokens=16)
-        idxs = [int(x.strip()) - 1 for x in raw.replace(",", " ").split()
-                if x.strip().isdigit()]
-        selected = [chunks[i] for i in idxs if 0 <= i < len(chunks)]
-        if selected:
-            return selected[:KEEP_CHUNKS]
-    except Exception:
-        pass
-    return chunks[:KEEP_CHUNKS]  # fallback: top by RRF
+    """Deterministically keep the top RRF-ranked chunks; no LLM reranker."""
+    del query  # ranking is already determined by Dense + BM25 + RRF
+    return chunks[:KEEP_CHUNKS]
 
 
 def _compute_quality(chunks: list[dict]) -> str:
@@ -58,7 +34,7 @@ def _compute_quality(chunks: list[dict]) -> str:
     if top is None and first.get("retriever") in {"dense", "hybrid"}:
         top = first.get("score", 0.0)
     lexical_hits = int(first.get("bm25_hits", 0))
-    n = len(chunks)
+    n   = len(chunks)
     if top is None:
         return "medium" if lexical_hits else "low"
     if top > 0.78 and n >= 3 and lexical_hits:
@@ -83,60 +59,39 @@ def _format_result(chunks: list[dict], quality: str) -> str:
     return prefix + sources_line + "\n" + body
 
 
-_SAMPLE_PER_ROUND = 30
-_FILES_PER_ROUND  = 200
-_MAX_ROUNDS       = 5
-
-
-def _summarize_batch(names: str, batch_size: int, total: int, round_info: str) -> str:
-    prompt = (
-        f"ชื่อไฟล์ {batch_size} ไฟล์ ({round_info}):\n{names}\n\n"
-        f"ระบุหมวดหมู่ความรู้ที่พบ (bullet points สั้นๆ ภาษาไทย ไม่เกิน 5 ข้อ)"
-    )
-    return _llm_chat(prompt, temperature=0.0, max_tokens=200)
-
-
 @tool
 def list_knowledge() -> str:
-    """Summarize what topics are stored in the knowledge base.
-
-    Use when the user asks what topics, documents, or files are in the knowledge base.
-    Scales sampling rounds by file count, then aggregates summaries. No query needed.
-    """
+    """Describe the KB deterministically from canonical metadata; no LLM."""
     try:
-        import math
-        import random
-
         paths = kb_operations.registered_paths()
         if not paths:
             return "ยังไม่มีไฟล์ใน knowledge base ครับ"
 
-        total   = len(paths)
-        rounds  = min(_MAX_ROUNDS, math.ceil(total / _FILES_PER_ROUND))
-        n_sample = min(rounds * _SAMPLE_PER_ROUND, total)
-        sampled  = random.sample(paths, n_sample)
-        batches  = [sampled[i * _SAMPLE_PER_ROUND:(i + 1) * _SAMPLE_PER_ROUND]
-                    for i in range(rounds)]
+        total = len(paths)
+        index_path = Path(__file__).resolve().parent / "rag_index.json"
+        payload: dict = {}
+        try:
+            loaded = json.loads(index_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            payload = {}
 
-        mini_summaries = []
-        for i, batch in enumerate(batches):
-            names = "\n".join(f"- {Path(p).name}" for p in batch)
-            round_info = f"รอบ {i+1}/{rounds} สุ่มจาก {total} ไฟล์"
-            mini_summaries.append(_summarize_batch(names, len(batch), total, round_info))
-
-        if rounds == 1:
-            summary = mini_summaries[0]
-        else:
-            combined = "\n\n".join(f"[รอบ {i+1}]\n{s}" for i, s in enumerate(mini_summaries))
-            agg_prompt = (
-                f"สรุปรวมจาก {rounds} รอบการสุ่มตรวจไฟล์ใน knowledge base:\n\n{combined}\n\n"
-                f"สรุปภาพรวมว่ามีความรู้เกี่ยวกับอะไรบ้าง (3-6 bullet points ภาษาไทย)"
-            )
-            summary = _llm_chat(agg_prompt, temperature=0.1, max_tokens=300)
-
-        return (f"พบไฟล์ทั้งหมด {total} ไฟล์ "
-                f"(สุ่มตรวจ {n_sample} ไฟล์ใน {rounds} รอบ) "
-                f"เจอความรู้ประมาณนี้:\n{summary}")
+        lines = [f"พบไฟล์ทั้งหมด {total} ไฟล์"]
+        topics = str(payload.get("topics_line") or "").strip()
+        if topics:
+            lines.append(f"หัวข้อ: {topics}")
+        tags = payload.get("tags") or {}
+        if isinstance(tags, dict) and tags:
+            top_tags = list(tags.items())[:20]
+            lines.append("tags: " + " | ".join(f"{name}({count})" for name, count in top_tags))
+        source_types = payload.get("source_types") or {}
+        if isinstance(source_types, dict) and source_types:
+            lines.append("ชนิดไฟล์: " + " | ".join(f"{name}({count})" for name, count in source_types.items()))
+        if len(lines) == 1:
+            names = " | ".join(Path(path).name for path in paths[:20])
+            lines.append(f"ตัวอย่างไฟล์: {names}")
+        return "\n".join(lines)
     except Exception as e:
         return f"[error] {e}"
 
@@ -155,7 +110,8 @@ def search_files(query: str) -> str:
         paths = kb_operations.registered_paths()
         if not paths:
             return "ยังไม่มีไฟล์ใน knowledge base ครับ"
-        matched = kb_operations.search_registered_paths(query)
+        q = query.lower()
+        matched = [p for p in paths if q in Path(p).name.lower()]
         if not matched:
             return f"ไม่พบไฟล์ที่มีคำว่า '{query}' ในชื่อไฟล์"
         total = len(matched)
@@ -190,7 +146,7 @@ def read_file(filename: str) -> str:
 
 @tool
 def save_memory(text: str) -> str:
-    """Save a note to persistent local memory under the configured state directory.
+    """Save a note to persistent memory file (data/memory.md).
 
     Use when user says 'จำไว้', 'บันทึกไว้', 'จำไว้ว่า', or 'remember'.
     IMPORTANT: pass the user's EXACT words as text — do NOT paraphrase, translate, or summarize.
@@ -220,7 +176,7 @@ def rag_search(query: str) -> str:
     """
     try:
         import _progress as P
-        P.report("🔍 ค้นหาใน knowledge base…", "📝 สร้าง Q1+Q2+Q3…")
+        P.report("🔍 ค้นหาใน knowledge base…", "📝 สร้าง query variants แบบ deterministic…")
         q1, q2, q3 = expand(query)
         queries = [q for q in [q1, q2, q3] if q.strip()]
 
@@ -232,7 +188,7 @@ def rag_search(query: str) -> str:
         if not chunks:
             return "[low_quality]\nNo results found in knowledge base."
 
-        P.report("🔍 ค้นหาใน knowledge base…", "🎯 Rerank chunks…")
+        P.report("🔍 ค้นหาใน knowledge base…", "🎯 เลือกอันดับสูงสุดจาก RRF…")
         selected = _rerank(q1, chunks)
         quality  = _compute_quality(selected)
         return _format_result(selected, quality)

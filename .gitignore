@@ -25,3 +25,8 @@ build/
 # OS/editor files
 .DS_Store
 .vscode/
+
+# MCP-RagMax derived/legacy runtime state
+data/
+rag_index.json
+rag_index.json.*.tmp

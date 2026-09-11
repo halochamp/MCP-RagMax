@@ -1,25 +1,16 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
+"""_runner.py — shared path setup + test() runner for rag_test_suite.
 
-"""Shared path setup and legacy test collector for the public test suite."""
+Adds MCP-RagMax/ to sys.path (so `import chunker`, `import retriever`, etc.
+work regardless of the caller's cwd) and provides a small PASS/FAIL collector.
+"""
 from __future__ import annotations
-import os
 import sys
-import tempfile
 import traceback
 from pathlib import Path
 
 _RAG_ROOT = str(Path(__file__).resolve().parent.parent)
 if _RAG_ROOT not in sys.path:
     sys.path.insert(0, _RAG_ROOT)
-
-_TEST_ROOT = Path(tempfile.mkdtemp(prefix="ragmax-test-"))
-os.environ.setdefault("RAGMAX_WORKSPACE", str(_TEST_ROOT / "workspace"))
-os.environ.setdefault("RAGMAX_KNOWLEDGE_DIR", str(_TEST_ROOT / "workspace" / "knowledge"))
-os.environ.setdefault("RAGMAX_STATE_DIR", str(_TEST_ROOT / "workspace" / ".rag_state"))
-os.environ.setdefault("RAGMAX_FAKE_EMBEDDINGS", "1")
-os.environ.setdefault("RAGMAX_NO_AUTO_START", "1")
 
 PASS = "✅"
 FAIL = "❌"

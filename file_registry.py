@@ -1,7 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 from __future__ import annotations
 import hashlib
 import json
@@ -103,6 +99,17 @@ def reload():
     _load(force=True)
 
 
+def registry_fingerprint() -> str:
+    """SHA-256 of the current atomic registry file, or empty when unavailable."""
+    with _LOCK:
+        _load()
+        try:
+            payload = REGISTRY_PATH.read_bytes()
+        except OSError:
+            return ""
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _save():
     global _loaded, _fingerprint
     with _LOCK:
@@ -131,16 +138,27 @@ def _hash_file(path: str) -> str:
 
 
 def _pipeline_fingerprint() -> str:
-    """Fingerprint settings that change persisted chunk/vector meaning."""
-    import embedder
-    import ingestor
+    """Fingerprint every setting that changes persisted chunk/vector meaning."""
+    from pipeline_config import EMBED_MODEL_NAME, PIPELINE_VERSION, SIMILARITY_REJECT
 
     h = hashlib.sha256()
-    h.update(b"rag-index-format-v2\0")
+    h.update((PIPELINE_VERSION + "\0").encode())
     h.update((Path(__file__).with_name("chunker.py")).read_bytes())
-    h.update(embedder.MODEL_NAME.encode())
-    h.update(f"{ingestor.SIMILARITY_PASS}:{ingestor.SIMILARITY_REJECT}".encode())
+    h.update(EMBED_MODEL_NAME.encode())
+    h.update(f"{SIMILARITY_REJECT}".encode())
     return h.hexdigest()
+
+
+def pipeline_outdated_count() -> int:
+    """Count registered files built with a different persisted pipeline policy."""
+    with _LOCK:
+        _load()
+        current = _pipeline_fingerprint()
+        return sum(
+            1
+            for value in _registry.values()
+            if not isinstance(value, dict) or value.get("pipeline_fingerprint") != current
+        )
 
 
 def check(path: str) -> str:
@@ -193,19 +211,24 @@ def ghost_files() -> list[str]:
     """Registered files with zero chunks in the vector store (benign dedup ghosts).
 
     Read-only — single source of truth for the registry/Chroma comparison, shared
-    by main.py's build self-check and the regression suite.
+    by main.py's build self-check, _test_index_health.py, and any external caller
+    by any trusted local caller that wants the same signal.
     """
     import store
     col = store._get_collection()
     if col.count() == 0:
         return []
-    # A malformed or out-of-scope metadata entry must not make a read-only
-    # health check crash the build.  It is not a valid source to compare.
+    # m["source"] may be an old-format absolute path or current-format _BASE-relative
+    # string — only absolute ones need _rel() (which itself expects a real fs path,
+    # not a value already relative to _BASE).  Malformed metadata must not make a
+    # read-only health check crash the build.
     chroma_sources = set()
     for metadata in col.get(include=["metadatas"])["metadatas"]:
         try:
             raw_source = metadata["source"]
-            chroma_sources.add(source_key(source_path(raw_source)))
+            chroma_sources.add(
+                _rel(raw_source) if Path(raw_source).is_absolute() else raw_source
+            )
         except (KeyError, TypeError, OSError, RuntimeError, ValueError):
             continue
     registered_rel = {_rel(p) for p in all_registered()}

@@ -1,7 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 """_test_chunker.py — chunker.split_text / chunk_document"""
 from _runner import Runner
 

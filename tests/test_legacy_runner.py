@@ -1,6 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
 
 """Run the retained regression modules in isolated temporary state."""
 from __future__ import annotations
@@ -26,7 +23,6 @@ def test_legacy_module(test_file: Path) -> None:
         "RAGMAX_KNOWLEDGE_DIR": str(temp_root / "workspace" / "knowledge"),
         "RAGMAX_STATE_DIR": str(temp_root / "workspace" / ".rag_state"),
         "RAGMAX_FAKE_EMBEDDINGS": "1",
-        "RAGMAX_NO_AUTO_START": "1",
     })
     result = subprocess.run(
         [sys.executable, str(test_file)],

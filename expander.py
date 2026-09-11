@@ -1,11 +1,7 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 from __future__ import annotations
-from pythainlp import word_tokenize, pos_tag
+import re
 
-from llm_client import chat as _llm_chat
+from pythainlp import word_tokenize, pos_tag
 
 CONNECTORS = {"แล้ว", "อีก", "ด้วย", "นั้น", "แบบ", "อันนั้น", "แล้วก็", "ที่ว่า"}
 CONTENT_POS = {"NOUN", "PROPN", "VERB", "NUM", "ADJ"}
@@ -19,15 +15,10 @@ def _is_thai(text: str) -> bool:
     return any("฀" <= c <= "๿" for c in text)
 
 
-def _translate(text: str) -> str:
-    if _is_thai(text):
-        prompt = f"Translate this Thai text to English. Reply with translation only:\n{text}"
-    else:
-        prompt = f"แปลข้อความนี้เป็นภาษาไทย ตอบเฉพาะคำแปล:\n{text}"
-    try:
-        return _llm_chat(prompt, temperature=0.0, max_tokens=64)
-    except Exception:
-        return ""
+def _normalize_query(text: str) -> str:
+    """Deterministic whitespace/punctuation normalization; never calls an LLM."""
+    compact = re.sub(r"\s+", " ", (text or "").strip())
+    return compact
 
 
 def _extract_keywords(text: str) -> str:
@@ -57,12 +48,16 @@ def maybe_contextualize(query: str, history: list[dict]) -> str:
 
 
 def expand(query: str, history: list[dict] | None = None) -> tuple[str, str, str]:
-    """Return (Q1, Q2, Q3).
-    Q1 = contextualized original
-    Q2 = cross-language translation
-    Q3 = extracted keywords
+    """Return three deterministic query representations without an LLM.
+
+    Q1 is the contextualized original, Q2 is a keyword-focused representation
+    for BM25, and Q3 is a normalized lexical form. The multilingual MiniLM
+    dense retriever handles cross-language semantics directly; callers such as
+    Agent MAX may still pass their own same-intent variants through MCP.
     """
-    q1 = maybe_contextualize(query, history or [])
-    q2 = _translate(q1)
-    q3 = _extract_keywords(q1)
+    q1 = _normalize_query(maybe_contextualize(query, history or []))
+    q2 = _extract_keywords(q1)
+    q3 = _normalize_query(re.sub(r"[^\w\u0E00-\u0E7F]+", " ", q1.casefold()))
+    if q3 == q1.casefold():
+        q3 = ""
     return q1, q2, q3

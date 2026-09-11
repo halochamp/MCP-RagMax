@@ -1,7 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 """One-time backfill: add BM25 entries for Chroma chunks ingested before
 BM25 support existed (file_registry's hash-skip gate never re-ingests
 unchanged files, so they never got a chance to backfill on their own).

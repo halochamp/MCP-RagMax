@@ -1,10 +1,5 @@
-# Agent entry point
+# MCP-RagMax public agent entry point
 
-This repository is self-contained.
+This repository is self-contained. Read `CLAUDE.md`, then `AGENT.md`, then `AGENT_PROCEDURE.md` before substantial work. `README.md`, `CONTRIBUTING.md`, and `SECURITY.md` define the public product and contributor contracts.
 
-1. Read [`CLAUDE.md`](CLAUDE.md) for mandatory constraints.
-2. Read [`AGENT.md`](AGENT.md) for the architecture and quick workflow.
-3. Use [`AGENT_PROCEDURE.md`](AGENT_PROCEDURE.md) for the full repository-agent procedure.
-4. Use [`README.md`](README.md), [`CONTRIBUTING.md`](CONTRIBUTING.md), and [`SECURITY.md`](SECURITY.md) for product, contributor, and security contracts.
-
-Preserve the Pipe A/B/C separation: Pipe C is a thin stdio MCP adapter over Pipe B and must not become a second retrieval or LLM pipeline.
+Preserve the deterministic no-backend-LLM design, nine-tool stdio MCP surface, `workspace/knowledge/` source confinement, ignored `workspace/.rag_state/` derived state, persistent build/cancellation semantics, and loopback-only HTML UI.

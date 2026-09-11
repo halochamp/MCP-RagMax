@@ -1,7 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 """_test_retriever.py — retriever._rrf_merge / fetch_parents"""
 from _runner import Runner
 

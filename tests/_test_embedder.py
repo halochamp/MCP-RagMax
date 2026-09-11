@@ -1,7 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 """_test_embedder.py — embedder.encode / encode_one"""
 from _runner import Runner
 

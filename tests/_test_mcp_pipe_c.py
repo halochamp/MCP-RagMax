@@ -1,7 +1,5 @@
 """Deterministic Pipe C (MCP) -> Pipe B contract tests; no live model required."""
 
-from __future__ import annotations
-
 import asyncio
 import sys
 import threading
@@ -19,7 +17,7 @@ def _server_module():
     return mcp_server
 
 
-def t_catalog_exposes_five_read_only_tools():
+def t_catalog_exposes_nine_bounded_tools():
     server = _server_module()
     tools = asyncio.run(server.mcp.list_tools())
     assert [item.name for item in tools] == [
@@ -27,6 +25,10 @@ def t_catalog_exposes_five_read_only_tools():
         "rag_list",
         "rag_search_files",
         "rag_read_file",
+        "build_kb",
+        "build_status",
+        "cancel_build",
+        "rag_rebuild_index",
         "rag_health",
     ]
     by_name = {item.name: item for item in tools}
@@ -48,6 +50,12 @@ def t_catalog_exposes_five_read_only_tools():
     assert "Do not add a new subquestion" in retrieve_description
     assert by_name["rag_search_files"].inputSchema["required"] == ["query"]
     assert by_name["rag_read_file"].inputSchema["required"] == ["filename"]
+    assert by_name["build_kb"].inputSchema.get("required", []) == []
+    assert by_name["build_status"].inputSchema["required"] == ["job_id"]
+    assert by_name["cancel_build"].inputSchema["required"] == ["job_id"]
+    rebuild_schema = by_name["rag_rebuild_index"].inputSchema
+    assert rebuild_schema.get("required", []) == []
+    assert set(rebuild_schema["properties"]) == {"mode", "topics", "expected_fingerprint"}
     assert by_name["rag_health"].inputSchema.get("required", []) == []
 
 
@@ -57,6 +65,8 @@ def t_pipe_c_does_not_load_pipe_a_or_llm():
     assert "main" not in sys.modules
     assert "llm_client" not in sys.modules
     assert "rag_search" not in sys.modules
+    assert "ingestor" not in sys.modules
+    assert "rag_index_builder" not in sys.modules
 
 
 def t_pipe_b_module_resolves_inside_this_rag_tree():
@@ -234,10 +244,90 @@ def t_shared_kb_tools_are_deterministic_and_read_only():
     with mock.patch.object(
         server.kb_operations,
         "health_snapshot",
-        return_value={"issues": [], "ghost_files": []},
-    ):
+        return_value={
+            "issues": [],
+            "ghost_files": [],
+            "registered_files": 3,
+            "pipeline_outdated_files": 0,
+            "index_status": "ready",
+            "index_files": 3,
+        },
+    ), mock.patch.object(server.build_jobs, "active_job_snapshot", return_value=None):
         health = server.rag_health()
-    assert health == "status=healthy\nissues=0\nghost_files=0"
+    assert "status=healthy" in health
+    assert "issues=0" in health
+    assert "ghost_files=0" in health
+    assert "registered_files=3" in health
+    assert "pipeline_outdated_files=0" in health
+    assert "index_status=ready" in health
+    assert "index_files=3" in health
+    assert "build_job_status=idle" in health
+
+
+def t_build_tools_delegate_without_loading_ingestor():
+    server = _server_module()
+    assert "ingestor" not in sys.modules
+    with mock.patch.object(server.build_jobs, "start_build", return_value="status=started\njob_id=build-123456789abc") as start:
+        out = server.build_kb()
+    assert "status=started" in out
+    start.assert_called_once_with()
+
+    with mock.patch.object(server.build_jobs, "build_status", return_value="status=running") as status:
+        assert server.build_status("build-123456789abc") == "status=running"
+    status.assert_called_once_with("build-123456789abc")
+
+    with mock.patch.object(server.build_jobs, "cancel_build", return_value="status=cancelling") as cancel:
+        assert server.cancel_build("build-123456789abc") == "status=cancelling"
+    cancel.assert_called_once_with("build-123456789abc")
+
+    import types
+    prepared = {
+        "status": "prepared",
+        "expected_fingerprint": "a" * 64,
+        "total_files": 2,
+        "sampled_files": 2,
+        "filenames": ["alpha.md", "beta.pdf"],
+        "top_tags": {"finance": 1},
+        "source_types": {"md": 1, "pdf": 1},
+        "topic_rules": {"guidance": "caller summarizes"},
+    }
+    committed = {
+        "total": 2,
+        "sampled": 2,
+        "tags": {"finance": 1},
+        "source_types": {"md": 1, "pdf": 1},
+        "topics_line": "การลงทุน | ความเสี่ยง",
+        "registry_fingerprint": "a" * 64,
+    }
+    fake_builder = types.SimpleNamespace(
+        prepare_index_context=mock.Mock(return_value=prepared),
+        commit_index=mock.Mock(return_value=committed),
+        IndexCommitConflict=type("IndexCommitConflict", (RuntimeError,), {}),
+        RAG_INDEX_PATH=Path("/tmp/rag_index.json"),
+    )
+    with mock.patch.object(server.build_jobs, "active_job_snapshot", return_value=None), \
+         mock.patch.dict(sys.modules, {"rag_index_builder": fake_builder}):
+        # Generic callers may not know the remote schema on the first call.
+        # Premature topics without a fingerprint must safely become prepare,
+        # never a write or an error.
+        prep = server.rag_rebuild_index(topics=["premature guess"])
+        assert "status=prepared" in prep
+        assert "expected_fingerprint=" + "a" * 64 in prep
+        assert "filenames_json=" in prep
+        assert "caller_must_continue=true" in prep
+        assert "caller_must_not_answer_before_commit=true" in prep
+        assert "next_arguments_json=" in prep
+        commit = server.rag_rebuild_index(
+            mode="commit",
+            topics=["การลงทุน", "ความเสี่ยง"],
+            expected_fingerprint="a" * 64,
+        )
+        assert "status=done" in commit
+        assert "topic_method=caller_llm" in commit
+        assert "llm_used_by_backend=false" in commit
+    fake_builder.prepare_index_context.assert_called_once_with()
+    fake_builder.commit_index.assert_called_once_with(["การลงทุน", "ความเสี่ยง"], "a" * 64)
+    assert "ingestor" not in sys.modules
 
 
 def t_shared_kb_tools_validate_scope_and_bounds():
@@ -286,7 +376,7 @@ def t_shared_kb_tools_validate_scope_and_bounds():
 def t_pipe_c_import_graph_never_loads_local_llm_modules():
     server = _server_module()
     assert server is not None
-    for module_name in ("main", "llm_client", "rag_search"):
+    for module_name in ("main", "llm_client", "rag_search", "ingestor", "rag_index_builder"):
         assert module_name not in sys.modules, module_name
 
 
@@ -345,17 +435,21 @@ def t_stdio_handshake_lists_pipe_c_without_starting_a_model():
                 return initialized.serverInfo.name, [item.name for item in listed.tools]
 
     name, tools = asyncio.run(handshake())
-    assert name == "ENDEAVOR_RAG Pipe C"
+    assert name == "MCP-RagMax Pipe C"
     assert tools == [
         "rag_retrieve",
         "rag_list",
         "rag_search_files",
         "rag_read_file",
+        "build_kb",
+        "build_status",
+        "cancel_build",
+        "rag_rebuild_index",
         "rag_health",
     ]
 
 
-r.test("catalog exposes five read-only tools", t_catalog_exposes_five_read_only_tools)
+r.test("catalog exposes nine bounded tools", t_catalog_exposes_nine_bounded_tools)
 r.test("Pipe C does not load Pipe A or its LLM", t_pipe_c_does_not_load_pipe_a_or_llm)
 r.test("Pipe B resolves inside this RAG tree", t_pipe_b_module_resolves_inside_this_rag_tree)
 r.test("valid request delegates to Pipe B", t_delegates_validated_request_to_pipe_b)
@@ -368,6 +462,7 @@ r.test("oversized output is explicitly capped", t_oversized_result_is_explicitly
 r.test("tiny output cap never overflows", t_tiny_cap_never_exceeds_configured_limit)
 r.test("output at the cap is unchanged", t_result_at_or_below_cap_is_unchanged)
 r.test("shared KB tools are deterministic and read-only", t_shared_kb_tools_are_deterministic_and_read_only)
+r.test("build tools delegate without loading ingestor", t_build_tools_delegate_without_loading_ingestor)
 r.test("shared KB tools validate scope and bounds", t_shared_kb_tools_validate_scope_and_bounds)
 r.test("Pipe C import graph never loads local LLM modules", t_pipe_c_import_graph_never_loads_local_llm_modules)
 r.test("Pipe B calls are serialized", t_pipe_b_calls_are_serialized)

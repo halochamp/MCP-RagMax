@@ -1,20 +1,16 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
+"""Deterministic shared knowledge-base operations for MCP and HTML clients.
 
-"""Deterministic shared knowledge-base operations for Pipeline A and Pipe C.
-
-This module intentionally has no dependency on ``main.py``, ``rag_search.py``,
-``llm_client.py``, or the local model runtime. It owns the small read-only KB
-primitives that both the local RAG agent and the MCP adapter can safely reuse.
-All registered paths are reconstructed through ``file_registry`` and therefore
-remain inside the configured knowledge root enforced by ``config.source_path``.
+This module has no chat-model dependency. It owns the small read-only KB
+primitives shared by the MCP adapter and standalone browser UI.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import file_registry
+from config import RAG_INDEX_PATH
+from pipeline_config import ORIENTATION_POLICY_ID
 
 
 _SUPPORTED_READ_EXT = frozenset({".txt", ".md", ".pdf", ".csv", ".json"})
@@ -89,13 +85,55 @@ def read_registered_file(filename: str) -> tuple[Path, str]:
     return path, text
 
 
+def _orientation_status(payload: object, current_fp: str, registered_count: int) -> tuple[str, int]:
+    """Classify canonical orientation freshness without touching disk or stores."""
+    if not isinstance(payload, dict):
+        return "invalid", 0
+    try:
+        index_files = int(payload.get("total") or 0)
+    except (TypeError, ValueError):
+        return "invalid", 0
+    stored_fp = str(payload.get("registry_fingerprint") or "")
+    stored_policy = str(payload.get("orientation_policy_id") or "")
+    ready = bool(
+        stored_fp
+        and stored_fp == current_fp
+        and index_files == int(registered_count)
+        and stored_policy == ORIENTATION_POLICY_ID
+    )
+    return ("ready" if ready else "stale"), index_files
+
+
 def health_snapshot() -> dict[str, object]:
-    """Return shared Chroma/BM25/registry health signals without mutating the KB."""
+    """Return deterministic store/registry/orientation health without mutating the KB."""
     import store
 
     issues = list(store.health_check())
     ghosts = list(file_registry.ghost_files())
+    registered = registered_paths()
+    pipeline_outdated = int(file_registry.pipeline_outdated_count())
+    index_path = RAG_INDEX_PATH
+    index_status = "missing"
+    index_files = 0
+    try:
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("rag_index root is not an object")
+        index_status, index_files = _orientation_status(
+            payload,
+            file_registry.registry_fingerprint(),
+            len(registered),
+        )
+    except FileNotFoundError:
+        index_status = "missing"
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        index_status = "invalid"
+
     return {
         "issues": issues,
         "ghost_files": ghosts,
+        "registered_files": len(registered),
+        "pipeline_outdated_files": pipeline_outdated,
+        "index_status": index_status,
+        "index_files": index_files,
     }

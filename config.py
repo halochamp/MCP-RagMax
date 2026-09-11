@@ -1,8 +1,4 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
-"""Central runtime configuration for the standalone public release."""
+"""Standalone public runtime configuration for MCP-RagMax."""
 from __future__ import annotations
 
 import os
@@ -19,6 +15,14 @@ def _path_setting(name: str, default: Path) -> Path:
     return (value if value.is_absolute() else ROOT_DIR / value).resolve()
 
 
+def _bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
 WORKSPACE_DIR = _path_setting("RAGMAX_WORKSPACE", ROOT_DIR / "workspace")
 KNOWLEDGE_DIR = _path_setting("RAGMAX_KNOWLEDGE_DIR", WORKSPACE_DIR / "knowledge")
 STATE_DIR = _path_setting("RAGMAX_STATE_DIR", WORKSPACE_DIR / ".rag_state")
@@ -27,31 +31,17 @@ BM25_PATH = STATE_DIR / "bm25.pkl"
 REGISTRY_PATH = STATE_DIR / "file_hashes.json"
 MEMORY_PATH = STATE_DIR / "memory.md"
 LOG_DIR = STATE_DIR / "logs"
-
-MLX_HOST = os.getenv("RAGMAX_MLX_HOST", "127.0.0.1")
-MLX_PORT = int(os.getenv("RAGMAX_MLX_PORT", "8092"))
-MLX_MODEL = os.getenv(
-    "RAGMAX_MLX_MODEL", "mlx-community/Qwen3.5-2B-OptiQ-4bit"
-)
-MLX_API_KEY = os.getenv("RAGMAX_MLX_API_KEY", "x")
-MLX_PREFILL_STEP_SIZE = int(os.getenv("RAGMAX_MLX_PREFILL_STEP_SIZE", "512"))
-MLX_SERVER_PYTHON = Path(
-    os.getenv("RAGMAX_MLX_PYTHON", str(ROOT_DIR / ".venv" / "bin" / "python"))
-).expanduser()
-if not MLX_SERVER_PYTHON.is_absolute():
-    MLX_SERVER_PYTHON = ROOT_DIR / MLX_SERVER_PYTHON
-MLX_SERVER_PYTHON = MLX_SERVER_PYTHON.resolve()
-NO_AUTO_START = os.getenv("RAGMAX_NO_AUTO_START", "").strip().lower() in {
-    "1", "true", "yes", "on"
-}
+RAG_INDEX_PATH = STATE_DIR / "rag_index.json"
+UI_HOST = "127.0.0.1"
+UI_PORT = _bounded_int("RAGMAX_UI_PORT", 8770, 1024, 65535)
 
 
 def _resolved(path: str | Path) -> Path:
-    return Path(path).expanduser().resolve()
+    return Path(path).expanduser().resolve(strict=False)
 
 
 def source_key(path: str | Path) -> str:
-    """Return a portable key for a file inside the configured knowledge root."""
+    """Return a portable relative key for a file inside KNOWLEDGE_DIR."""
     candidate = _resolved(path)
     try:
         return candidate.relative_to(KNOWLEDGE_DIR).as_posix()
@@ -62,7 +52,7 @@ def source_key(path: str | Path) -> str:
 
 
 def source_path(source: str | Path) -> Path:
-    """Resolve a stored key and reject path/symlink escapes."""
+    """Resolve a stored key and reject absolute, traversal, or symlink escapes."""
     raw = Path(source).expanduser()
     candidate = _resolved(raw if raw.is_absolute() else KNOWLEDGE_DIR / raw)
     try:

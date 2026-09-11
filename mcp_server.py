@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""Pipe C: a small stdio MCP adapter for the public ENDEAVOR_RAG release.
+"""Pipe C: a small stdio MCP adapter for MCP-RagMax.
 
 The dependency direction is intentionally one-way::
 
     MCP client -> Pipe C -> Pipe B (rag_retrieve) -> retriever/index
+                         -> shared KB operations -> registry/files/health
+                         -> detached build worker -> ingestor/index stores
 
-Pipe C is a protocol/read-only KB boundary.  It never imports ``main.py``,
-``rag_search.py``, or ``llm_client.py`` and therefore never starts or calls the
-standalone Pipeline A model.  Pipe B remains the single implementation of
-semantic retrieval; deterministic KB inspection is shared through
-``kb_operations.py``.
+MCP-RagMax is deterministic end-to-end. The MCP server never imports the
+embedding/build stack until a detached worker needs it, and no retrieval,
+build, index, health, or UI path calls an LLM. Pipe B remains the single
+implementation of semantic retrieval, while ``kb_operations`` provides
+read-only KB helpers. Build control is handed to a detached worker through
+``build_jobs`` so status/cancellation persist even when an MCP client opens a
+new stdio process for every tool call.
 """
 
 from __future__ import annotations
 
 import datetime as _datetime
+import json
 import threading
 from pathlib import Path
 from typing import TypeAlias
@@ -22,7 +27,9 @@ from typing import TypeAlias
 from mcp.server.fastmcp import FastMCP
 
 from rag_retrieve import rag_retrieve as _pipe_b_rag_retrieve
+import build_jobs
 import kb_operations
+from pipeline_config import ORIENTATION_POLICY_ID
 
 
 Query: TypeAlias = str | list[str]
@@ -35,8 +42,9 @@ _MAX_OUTPUT_CHARS = 50_000
 _MAX_FILENAME_CHARS = 512
 _MAX_LIST_LIMIT = 200
 
-# Chroma/BM25 clients are shared by Pipe B.  Keep calls serialized until a
-# dedicated concurrent-read test proves that every backend is safe to share.
+# Chroma/BM25 clients are shared by Pipe B.  Keep v1 conservative until a
+# dedicated concurrent-read test proves that every backend used by retriever.py
+# is safe to call concurrently.
 _RETRIEVE_LOCK = threading.Lock()
 
 
@@ -52,11 +60,11 @@ _QUERY_GUIDANCE = (
 
 
 mcp = FastMCP(
-    "ENDEAVOR_RAG Pipe C",
+    "MCP-RagMax Pipe C",
     instructions=(
-        "Pipe C is a local, deterministic, read-only MCP adapter. It exposes "
-        "retrieval and shared KB inspection operations and never imports, starts, "
-        "or calls the standalone Pipeline A LLM. " + _QUERY_GUIDANCE
+        "MCP-RagMax is a local deterministic RAG backend. Retrieval/inspection tools are "
+        "read-only. Bounded build tools mutate only derived index/state, never source "
+        "documents. Search, build, index generation, health and UI use no LLM. " + _QUERY_GUIDANCE
     ),
 )
 
@@ -95,8 +103,8 @@ def _validate_date(name: str, value: object) -> str:
         return ""
     try:
         parsed = _datetime.date.fromisoformat(text)
-    except ValueError:
-        raise ValueError(f"{name} must use YYYY-MM-DD") from None
+    except ValueError as exc:
+        raise ValueError(f"{name} must use YYYY-MM-DD") from exc
     if parsed.isoformat() != text:
         raise ValueError(f"{name} must use YYYY-MM-DD")
     return text
@@ -162,14 +170,16 @@ def _call_pipe_b(arguments: dict[str, object]) -> str:
             result = _invoke_pipe_b(arguments)
         except Exception as exc:
             # Do not retain the backend exception as a chained cause: MCP hosts
-            # may render exception chains/tracebacks and expose local details.
+            # may render exception chains/tracebacks, which could expose paths
+            # or other backend details even when the public message is safe.
             raise RuntimeError(f"Pipe B rag_retrieve failed ({type(exc).__name__})") from None
 
     if not isinstance(result, str):
         raise RuntimeError("Pipe B rag_retrieve returned a non-text result")
     if result.startswith("[error]"):
-        # Pipe B errors can contain backend paths or exception details.  Keep
-        # MCP failure semantics without forwarding those details.
+        # Pipe B's user-facing error can contain backend paths or exception
+        # details.  Preserve MCP failure semantics without forwarding those
+        # details across the tool boundary.
         raise RuntimeError("Pipe B rag_retrieve returned an error")
     return _cap_output(result)
 
@@ -197,8 +207,8 @@ def rag_retrieve(
     Variants are searched independently with Dense + BM25 and then RRF-fused.
 
     ``mode`` is ``chunks``, ``files``, or ``source_first``. Date filters use
-    ``YYYY-MM-DD``. This is read-only. It does not call Pipeline A's LLM, read
-    arbitrary paths, or expose shell/Python/memory-write tools.
+    ``YYYY-MM-DD``. This is read-only and LLM-free. It does not read arbitrary
+    paths or expose shell/Python/memory-write tools.
     """
     arguments = _validate_request(
         query,
@@ -274,19 +284,186 @@ def rag_read_file(filename: str) -> str:
 
 
 @mcp.tool()
+def build_kb() -> str:
+    """Start a background RAG_MAX knowledge-base build and return a persistent job id.
+
+    The source root is fixed by RAG_MAX's ingestion configuration; callers cannot
+    supply arbitrary paths. Poll ``build_status(job_id)`` for live file/chunk
+    progress. Use ``cancel_build(job_id)`` to request cooperative cancellation.
+    """
+    return _cap_output(build_jobs.start_build())
+
+
+@mcp.tool()
+def build_status(job_id: str) -> str:
+    """Return live progress for one background build job."""
+    clean = _bounded_text("job_id", job_id, limit=64, allow_empty=False)
+    return _cap_output(build_jobs.build_status(clean))
+
+
+@mcp.tool()
+def cancel_build(job_id: str) -> str:
+    """Request safe cooperative cancellation of one background build job.
+
+    New-file ingestion can roll back mid-file. A changed file already inside
+    its destructive rebuild section is completed first, then cancellation is
+    honored before the next file so the source is not left missing from the
+    derived index merely because the user cancelled.
+    """
+    clean = _bounded_text("job_id", job_id, limit=64, allow_empty=False)
+    return _cap_output(build_jobs.cancel_build(clean))
+
+
+@mcp.tool()
+def rag_rebuild_index(
+    mode: str = "auto",
+    topics: list[str] | None = None,
+    expected_fingerprint: str = "",
+) -> str:
+    """Prepare or commit canonical ``rag_index.json`` using the caller's LLM.
+
+    ``mode='auto'`` (default) makes the first call a safe prepare. If both
+    ``topics`` and ``expected_fingerprint`` are supplied it commits instead.
+    Supplying topics early without a fingerprint is treated as prepare and does
+    not write anything, making the contract robust for generic MCP callers that
+    have not seen this remote schema yet.
+
+    ``mode='prepare'`` returns a bounded deterministic snapshot of filenames,
+    tags, source types, and an ``expected_fingerprint``. The calling agent's own
+    LLM should derive 1-30 concise high-level topic labels from that snapshot.
+
+    ``mode='commit'`` accepts those topic labels plus the exact fingerprint from
+    prepare. MCP-RagMax validates the topics, recomputes deterministic metadata,
+    rechecks the fingerprint, and atomically writes ``rag_index.json``. If the KB
+    changed between phases, commit fails and the caller must prepare again.
+
+    MCP-RagMax never calls an LLM in either phase. Do not use build_status or
+    cancel_build for this tool; prepare/commit are short synchronous operations.
+    """
+    selected_mode = _bounded_text("mode", mode, limit=16, allow_empty=False).lower()
+    if selected_mode not in {"auto", "prepare", "commit"}:
+        raise ValueError("mode must be auto, prepare or commit")
+    if selected_mode == "auto":
+        has_topics = bool(topics)
+        has_fingerprint = bool(str(expected_fingerprint or "").strip())
+        if has_topics and has_fingerprint:
+            selected_mode = "commit"
+        elif has_fingerprint and not has_topics:
+            raise ValueError("topics are required when expected_fingerprint is supplied")
+        else:
+            # No fingerprint means there is no write authority. Ignore any
+            # premature caller topics and return the authoritative snapshot.
+            selected_mode = "prepare"
+            topics = None
+
+    active = build_jobs.active_job_snapshot()
+    if active is not None:
+        return _cap_output(
+            "\n".join(
+                [
+                    "status=busy",
+                    f"build_job_id={active.get('job_id') or ''}",
+                    f"build_job_status={active.get('status') or 'running'}",
+                    "next=wait for build_status(job_id) to become terminal, then prepare again",
+                ]
+            )
+        )
+
+    import rag_index_builder
+
+    if selected_mode == "prepare":
+        if topics:
+            raise ValueError("topics are only accepted in commit mode")
+        if str(expected_fingerprint or "").strip():
+            raise ValueError("expected_fingerprint is only accepted in commit mode")
+        prepared = rag_index_builder.prepare_index_context()
+        return _cap_output(
+            "\n".join(
+                [
+                    "status=prepared",
+                    "mode=prepare",
+                    f"expected_fingerprint={prepared['expected_fingerprint']}",
+                    f"total_files={prepared['total_files']}",
+                    f"sampled_files={prepared['sampled_files']}",
+                    "source_types_json=" + json.dumps(prepared["source_types"], ensure_ascii=False, sort_keys=True),
+                    "top_tags_json=" + json.dumps(prepared["top_tags"], ensure_ascii=False, sort_keys=True),
+                    "filenames_json=" + json.dumps(prepared["filenames"], ensure_ascii=False),
+                    "topic_guidance=" + str(prepared["topic_rules"]["guidance"]),
+                    "caller_must_continue=true",
+                    "caller_must_not_answer_before_commit=true",
+                    "next_tool=rag_rebuild_index",
+                    "next_arguments_json=" + json.dumps(
+                        {
+                            "mode": "commit",
+                            "topics": ["<1-30 concise topics derived only from this snapshot>"],
+                            "expected_fingerprint": prepared["expected_fingerprint"],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    "next=Derive topics with your own LLM, replace the placeholder topics in next_arguments_json, call rag_rebuild_index again, and only answer after status=done",
+                    f"orientation_policy_id={ORIENTATION_POLICY_ID}",
+                    "llm_used_by_backend=false",
+                ]
+            )
+        )
+
+    if topics is None:
+        raise ValueError("topics are required in commit mode")
+    if not isinstance(topics, list):
+        raise ValueError("topics must be an array of strings")
+    if len(topics) > 30:
+        raise ValueError("topics may contain at most 30 items")
+    fingerprint = _bounded_text(
+        "expected_fingerprint", expected_fingerprint, limit=64, allow_empty=False
+    ).lower()
+    try:
+        result = rag_index_builder.commit_index(topics, fingerprint)
+    except rag_index_builder.IndexCommitConflict:
+        raise RuntimeError("rag_index commit conflict; knowledge changed, run prepare again") from None
+    return _cap_output(
+        "\n".join(
+            [
+                "status=done",
+                "mode=commit",
+                f"files={int(result.get('total') or 0)}",
+                f"sampled={int(result.get('sampled') or 0)}",
+                f"tags={len(result.get('tags') or {})}",
+                f"source_types={len(result.get('source_types') or {})}",
+                f"topics={result.get('topics_line') or ''}",
+                f"registry_fingerprint={result.get('registry_fingerprint') or ''}",
+                "topic_method=caller_llm",
+                f"orientation_policy_id={ORIENTATION_POLICY_ID}",
+                "llm_used_by_backend=false",
+                f"output={rag_index_builder.RAG_INDEX_PATH}",
+            ]
+        )
+    )
+
+
+@mcp.tool()
 def rag_health() -> str:
-    """Report deterministic Chroma/BM25/registry health without using an LLM."""
+    """Report deterministic store, registry, rag_index freshness, and build-job health."""
     with _RETRIEVE_LOCK:
         snapshot = kb_operations.health_snapshot()
     issues = list(snapshot.get("issues") or [])
     ghosts = list(snapshot.get("ghost_files") or [])
-    if not issues and not ghosts:
-        return "status=healthy\nissues=0\nghost_files=0"
+    index_status = str(snapshot.get("index_status") or "missing")
+    pipeline_outdated = int(snapshot.get("pipeline_outdated_files") or 0)
+    active = build_jobs.active_job_snapshot()
+    healthy = not issues and not ghosts and pipeline_outdated == 0 and index_status == "ready"
     lines = [
-        "status=degraded",
+        f"status={'healthy' if healthy else 'degraded'}",
         f"issues={len(issues)}",
         f"ghost_files={len(ghosts)}",
+        f"registered_files={int(snapshot.get('registered_files') or 0)}",
+        f"pipeline_outdated_files={pipeline_outdated}",
+        f"index_status={index_status}",
+        f"index_files={int(snapshot.get('index_files') or 0)}",
+        f"build_job_status={str(active.get('status') or 'running') if active else 'idle'}",
     ]
+    if active:
+        lines.append(f"build_job_id={active.get('job_id') or ''}")
+        lines.append(f"build_job_kind={active.get('job_kind') or 'build_kb'}")
     lines.extend(f"issue: {item}" for item in issues)
     lines.extend(f"ghost: {Path(item).name}" for item in ghosts)
     return _cap_output("\n".join(lines))

@@ -1,7 +1,3 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 """_test_store.py — store.upsert_chunk / dense_search / bm25 / get_chunk_hash"""
 from _runner import Runner
 
@@ -12,8 +8,9 @@ def _snapshot(store):
     names = [
         "DB_DIR", "BM25_PATH", "_chroma_client", "_collection", "_bm25",
         "_bm25_corpus", "_bm25_ids", "_bm25_sources", "_bm25_mtime",
-        "_bm25_pending",
     ]
+    if hasattr(store, "_bm25_pending"):
+        names.append("_bm25_pending")
     return {name: getattr(store, name) for name in names}
 
 
@@ -28,7 +25,8 @@ def _reset(store, root):
     store._bm25_ids = []
     store._bm25_sources = []
     store._bm25_mtime = 0.0
-    store._bm25_pending = {}
+    if hasattr(store, "_bm25_pending"):
+        store._bm25_pending = {}
 
 
 def _restore(store, saved):
@@ -86,7 +84,6 @@ def t37_bm25_flush_preserves_cold_disk_index():
         "_bm25_ids": store._bm25_ids,
         "_bm25_sources": store._bm25_sources,
         "_bm25_mtime": store._bm25_mtime,
-        "_bm25_pending": store._bm25_pending,
     }
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -103,7 +100,6 @@ def t37_bm25_flush_preserves_cold_disk_index():
             store._bm25_ids = []
             store._bm25_sources = []
             store._bm25_mtime = 0.0
-            store._bm25_pending = {}
 
             store.bm25_flush()
 
@@ -123,12 +119,10 @@ def t47_bm25_exact_match_works_in_one_document_corpus():
     try:
         with tempfile.TemporaryDirectory() as tmp:
             _reset(store, tmp)
-            cid = store.upsert_chunk(
-                "rareterm", "rareterm parent", [1.0, 0.0, 0.0], "one.md", 0, 0
-            )
+            cid = store.upsert_chunk("rareterm", "rareterm parent", [1.0, 0.0, 0.0], "one.md", 0, 0)
             store.bm25_add("rareterm", cid, "one.md")
             results = store.bm25_search("rareterm", top_k=3)
-            assert [item["id"] for item in results] == [cid]
+            assert [r["id"] for r in results] == [cid]
             assert store.bm25_search("absentterm", top_k=3) == []
     finally:
         store._chroma_client = None

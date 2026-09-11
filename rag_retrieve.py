@@ -1,24 +1,19 @@
-# Developer: Poomwat Jarussri
-# Email: champoomwat@gmail.com
-# GitHub: https://github.com/halochamp
-
 from __future__ import annotations
 from pathlib import Path
 import datetime
+
+from config import source_path
 import re
 
 from langchain_core.tools import tool
 
-from config import source_path
 import retriever
 
 TOP_N = 5
 RELATED_N = 5   # extra lower-ranked fused hits surfaced as see-also (filenames only, no body)
 
-
 def _to_abs(source: str) -> str:
-    """Reconstruct absolute path from a stored source (relative to the
-    configured knowledge root, or already absolute)."""
+    """Resolve and validate a stored source inside the configured knowledge root."""
     return str(source_path(source))
 
 

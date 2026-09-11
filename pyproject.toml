@@ -1,26 +1,22 @@
 [project]
-name = "ENDEAVOR_RAG"
-version = "0.1.0"
-description = "Local-first Thai/English hybrid RAG assistant for Apple Silicon Macs"
+name = "mcp-ragmax"
+version = "0.2.0"
+description = "Local deterministic Thai/English RAG backend with MCP and loopback UI"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 license = { file = "LICENSE" }
 dependencies = [
-    "chromadb",
-    "httpx",
-    "langchain-core",
-    "langchain-openai",
-    "langchain-text-splitters",
-    "langgraph",
-    "mcp>=1.26,<2",
-    "mlx-vlm",
-    "numpy",
-    "pypdf",
-    "pythainlp",
-    "rank-bm25",
-    "requests",
-    "rich",
-    "sentence-transformers",
+    "chromadb>=1.5,<2",
+    "fastapi>=0.136,<1",
+    "langchain-core>=1.2,<2",
+    "langchain-text-splitters>=1.1,<2",
+    "mcp>=1.0,<3",
+    "numpy>=2,<3",
+    "pypdf>=6,<7",
+    "pythainlp>=5.3,<6",
+    "rank-bm25>=0.2,<1",
+    "sentence-transformers>=5.5,<6",
+    "uvicorn>=0.48,<1",
 ]
 
 [dependency-groups]
@@ -28,4 +24,5 @@ dev = ["pytest"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+python_files = ["test_*.py"]
 addopts = "-q"
