@@ -11,7 +11,7 @@ MCP-RagMax คือ RAG backend ที่ทำงานบนเครื่�
 - Hybrid retrieval: multilingual MiniLM dense search + Thai-aware BM25 + Reciprocal Rank Fusion (RRF)
 - Incremental KB build พร้อม file registry, exact-hash dedup และ deterministic semantic duplicate rejection
 - Persistent background build jobs พร้อม progress, ETA และ cooperative cancellation
-- MCP stdio 9 tools สำหรับ retrieval, file access ภายใน KB, build, health และ orientation index
+- MCP stdio 4 tools สำหรับ retrieval, file access ภายใน KB, build, health และ orientation index
 - `rag_index.json` lifecycle แบบ prepare/commit: caller LLM ช่วยเสนอได้เฉพาะ topic labels ส่วน counts/tags/source types/fingerprint เป็น backend truth
 - Local HTML RAG console ที่ `127.0.0.1:8770`
 - Source confinement: อ่านไฟล์ได้เฉพาะใต้ `workspace/knowledge/`
@@ -36,17 +36,15 @@ Backend ไม่มี chat agent และไม่ start local/cloud LLM เ�
 
 ## MCP tools
 
-MCP catalog มี 9 tools:
+MCP catalog มี 4 tools:
 
-1. `rag_retrieve` — Dense + BM25 + RRF retrieval; รองรับ same-intent query variants และ filters
-2. `rag_list` — แสดงไฟล์ที่ register อยู่ใน KB
-3. `rag_search_files` — ค้น filename แบบ deterministic
-4. `rag_read_file` — อ่านไฟล์ที่ register แล้วเท่านั้น
-5. `build_kb` — เริ่ม background KB build และคืน persistent `job_id`
-6. `build_status(job_id)` — ดู phase/progress/ETA
-7. `cancel_build(job_id)` — ขอ cooperative cancellation
-8. `rag_rebuild_index` — `prepare` context หรือ `commit` caller topics ด้วย fingerprint protection
-9. `rag_health` — ตรวจ Chroma/BM25/registry/pipeline/orientation/job health
+1. `rag_retrieve` — hybrid retrieval (`chunks`, `files`, `source_first`)
+2. `rag_files` — `list` (limit/offset), `search` (query/limit), `read` (filename)
+3. `rag_manage` — `build_start`, `build_cancel` (job_id), `index_prepare`, `index_commit` (topics/expected_fingerprint)
+4. `rag_status` — `health` หรือ `build` (job_id)
+
+อ่านไฟล์ผ่าน `rag_files(action="read", filename=...)`; prepare/commit ใช้
+`rag_manage` และ build polling ใช้ `rag_status` ตาม action/view ข้างต้น.
 
 MCP ไม่ expose shell, Python execution หรือ arbitrary filesystem read
 
@@ -86,7 +84,7 @@ python tools/doctor.py
 python tools/build_index.py
 ```
 
-หรือผ่าน MCP ใช้ `build_kb` แล้ว poll ด้วย `build_status`
+หรือผ่าน MCP ใช้ `rag_manage(action="build_start")` แล้ว poll ด้วย `rag_status(view="build", job_id=...)`
 
 ### 5. เปิด HTML UI
 
@@ -127,7 +125,7 @@ Caller สามารถส่ง query variants ได้สูงสุดต
 
 ## Build และ cancellation
 
-`build_kb` สแกน `workspace/knowledge/` แล้ว process new/changed files เท่านั้น Registry, Chroma และ BM25 มี consistency/rollback guards
+`rag_manage(action="build_start")` สแกน `workspace/knowledge/` แล้ว process new/changed files เท่านั้น Registry, Chroma และ BM25 มี consistency/rollback guards
 
 - new file: cancellation สามารถหยุดกลาง ingest และ rollback partial writes
 - changed file: เมื่อเริ่ม replace old rows แล้ว จะ finish file ปัจจุบันก่อน honoring cancellation เพื่อลดช่วงที่ source หายจาก index
@@ -137,9 +135,9 @@ Caller สามารถส่ง query variants ได้สูงสุดต
 
 MCP-RagMax ไม่เรียก LLM เอง แต่ caller agent อาจใช้ LLM ของตัวเองช่วยสร้าง high-level topics ผ่าน protocol ที่จำกัด:
 
-1. `rag_rebuild_index(mode="prepare")` คืน bounded deterministic snapshot + `expected_fingerprint`
+1. `rag_manage(action="index_prepare")` คืน bounded deterministic snapshot + `expected_fingerprint`
 2. caller สร้าง topic labels 1–30 รายการจาก snapshot
-3. `rag_rebuild_index(mode="commit", topics=..., expected_fingerprint=...)`
+3. `rag_manage(action="index_commit", topics=..., expected_fingerprint=...)`
 4. backend validate topics, recompute metadata และ recheck fingerprint ก่อน atomic install
 
 ถ้า KB เปลี่ยนระหว่าง prepare/commit จะ fail ด้วย conflict และไม่ทับ index ที่ดีอยู่เดิม
@@ -162,7 +160,7 @@ Public port เก็บ orientation file ที่ `workspace/.rag_state/rag_in
 
 - UI bind ที่ `127.0.0.1` เท่านั้น
 - MCP ใช้ stdio สำหรับ trusted local host
-- `rag_read_file` อ่านได้เฉพาะ registered file ใน configured knowledge root
+- `rag_files(action="read")` อ่านได้เฉพาะ registered file ใน configured knowledge root
 - ไม่มี shell/Python/arbitrary path MCP tools
 - user documents และ generated state ไม่ถูก commit
 - ไม่มี cloud LLM call ใน backend
@@ -183,7 +181,7 @@ python tests/run_all.py
 python -m pytest tests -q
 ```
 
-Test suite ครอบคลุม chunking, dense/BM25/RRF, registry lifecycle, deterministic dedup, dual-store rollback, cancellation, persistent jobs, 9-tool MCP schema/handshake, caller-assisted rag index และ loopback Web UI
+Test suite ครอบคลุม chunking, dense/BM25/RRF, registry lifecycle, deterministic dedup, dual-store rollback, cancellation, persistent jobs, 4-tool MCP schema/handshake, caller-assisted rag index และ loopback Web UI
 
 ## System requirements
 

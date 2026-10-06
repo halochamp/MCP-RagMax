@@ -4,7 +4,7 @@ This module is safe to import from Pipe C: it imports only the standard
 library. The heavier embedding/Chroma ingestion stack is loaded only inside the
 detached worker process created by ``start_build``. The managed job covers KB
 ingestion only and never calls an LLM; orientation prepare/commit is synchronous
-through ``rag_rebuild_index`` and caller-assisted outside this job manager.
+through ``rag_manage`` index_prepare/index_commit actions and caller-assisted outside this job manager.
 """
 from __future__ import annotations
 
@@ -152,8 +152,8 @@ def _format_job(state: dict[str, object], *, prefix: str | None = None) -> str:
     ]
     if status in {"started", "already_running", "queued", "running", "cancelling"}:
         job_id = state.get("job_id") or ""
-        lines.append(f"next=build_status(job_id={job_id})")
-        lines.append(f"cancel=cancel_build(job_id={job_id})")
+        lines.append(f"next=rag_status(view=build, job_id={job_id})")
+        lines.append(f"cancel=rag_manage(action=build_cancel, job_id={job_id})")
     if state.get("summary"):
         lines.extend(["result:", str(state["summary"])])
     if state.get("error"):
@@ -451,7 +451,7 @@ def run_persistent_job(
             f"health_issues={len(result.get('health_issues') or [])}",
             f"ghost_files={int(result.get('ghost_count') or 0)}",
             f"seconds={float(result.get('elapsed') or 0.0):.2f}",
-            "orientation_next=rag_rebuild_index(mode=prepare)",
+            "orientation_next=rag_manage(action=index_prepare)",
         ]
     )
     update(

@@ -22,7 +22,7 @@ import datetime as _datetime
 import json
 import threading
 from pathlib import Path
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 from mcp.server.fastmcp import FastMCP
 
@@ -33,6 +33,10 @@ from pipeline_config import ORIENTATION_POLICY_ID
 
 
 Query: TypeAlias = str | list[str]
+RetrieveMode = Literal["chunks", "files", "source_first"]
+FilesAction = Literal["list", "search", "read"]
+ManageAction = Literal["build_start", "build_cancel", "index_prepare", "index_commit"]
+StatusView = Literal["health", "build"]
 
 _ALLOWED_MODES = frozenset({"chunks", "files", "source_first"})
 _MAX_QUERY_VARIANTS = 8
@@ -187,7 +191,7 @@ def _call_pipe_b(arguments: dict[str, object]) -> str:
 @mcp.tool()
 def rag_retrieve(
     query: str | list[str],
-    mode: str = "chunks",
+    mode: RetrieveMode = "chunks",
     tags: str = "",
     filename_contains: str = "",
     created_after: str = "",
@@ -236,7 +240,6 @@ def _validated_offset(offset: object) -> int:
     return offset
 
 
-@mcp.tool()
 def rag_list(limit: int = 100, offset: int = 0) -> str:
     """List files registered in the knowledge base without using an LLM."""
     page_size = _validated_limit(limit)
@@ -252,7 +255,6 @@ def rag_list(limit: int = 100, offset: int = 0) -> str:
     )
 
 
-@mcp.tool()
 def rag_search_files(query: str, limit: int = 30) -> str:
     """Search registered knowledge-base filenames, case-insensitively, without an LLM."""
     needle = _bounded_text("query", query, limit=_MAX_FILENAME_CHARS, allow_empty=False)
@@ -267,7 +269,6 @@ def rag_search_files(query: str, limit: int = 30) -> str:
     )
 
 
-@mcp.tool()
 def rag_read_file(filename: str) -> str:
     """Read one registered KB document only; arbitrary filesystem paths are not allowed."""
     requested = _bounded_text(
@@ -283,25 +284,22 @@ def rag_read_file(filename: str) -> str:
     return _cap_output(f"file={path.name}\n{text}")
 
 
-@mcp.tool()
 def build_kb() -> str:
     """Start a background RAG_MAX knowledge-base build and return a persistent job id.
 
     The source root is fixed by RAG_MAX's ingestion configuration; callers cannot
-    supply arbitrary paths. Poll ``build_status(job_id)`` for live file/chunk
-    progress. Use ``cancel_build(job_id)`` to request cooperative cancellation.
+    supply arbitrary paths. Public MCP callers poll with ``rag_status(view="build")``
+    and cancel with ``rag_manage(action="build_cancel")``.
     """
     return _cap_output(build_jobs.start_build())
 
 
-@mcp.tool()
 def build_status(job_id: str) -> str:
     """Return live progress for one background build job."""
     clean = _bounded_text("job_id", job_id, limit=64, allow_empty=False)
     return _cap_output(build_jobs.build_status(clean))
 
 
-@mcp.tool()
 def cancel_build(job_id: str) -> str:
     """Request safe cooperative cancellation of one background build job.
 
@@ -314,7 +312,6 @@ def cancel_build(job_id: str) -> str:
     return _cap_output(build_jobs.cancel_build(clean))
 
 
-@mcp.tool()
 def rag_rebuild_index(
     mode: str = "auto",
     topics: list[str] | None = None,
@@ -337,8 +334,8 @@ def rag_rebuild_index(
     rechecks the fingerprint, and atomically writes ``rag_index.json``. If the KB
     changed between phases, commit fails and the caller must prepare again.
 
-    MCP-RagMax never calls an LLM in either phase. Do not use build_status or
-    cancel_build for this tool; prepare/commit are short synchronous operations.
+    MCP-RagMax never calls an LLM in either phase. Prepare/commit are short
+    synchronous operations exposed through ``rag_manage`` action choices.
     """
     selected_mode = _bounded_text("mode", mode, limit=16, allow_empty=False).lower()
     if selected_mode not in {"auto", "prepare", "commit"}:
@@ -364,7 +361,7 @@ def rag_rebuild_index(
                     "status=busy",
                     f"build_job_id={active.get('job_id') or ''}",
                     f"build_job_status={active.get('status') or 'running'}",
-                    "next=wait for build_status(job_id) to become terminal, then prepare again",
+                    "next=wait for rag_status(view=build, job_id=...) to become terminal, then call rag_manage(action=index_prepare) again",
                 ]
             )
         )
@@ -391,16 +388,16 @@ def rag_rebuild_index(
                     "topic_guidance=" + str(prepared["topic_rules"]["guidance"]),
                     "caller_must_continue=true",
                     "caller_must_not_answer_before_commit=true",
-                    "next_tool=rag_rebuild_index",
+                    "next_tool=rag_manage",
                     "next_arguments_json=" + json.dumps(
                         {
-                            "mode": "commit",
+                            "action": "index_commit",
                             "topics": ["<1-30 concise topics derived only from this snapshot>"],
                             "expected_fingerprint": prepared["expected_fingerprint"],
                         },
                         ensure_ascii=False,
                     ),
-                    "next=Derive topics with your own LLM, replace the placeholder topics in next_arguments_json, call rag_rebuild_index again, and only answer after status=done",
+                    "next=Derive topics with your own LLM, replace the placeholder topics in next_arguments_json, call rag_manage with those arguments, and only answer after status=done",
                     f"orientation_policy_id={ORIENTATION_POLICY_ID}",
                     "llm_used_by_backend=false",
                 ]
@@ -440,7 +437,6 @@ def rag_rebuild_index(
     )
 
 
-@mcp.tool()
 def rag_health() -> str:
     """Report deterministic store, registry, rag_index freshness, and build-job health."""
     with _RETRIEVE_LOCK:
@@ -467,6 +463,76 @@ def rag_health() -> str:
     lines.extend(f"issue: {item}" for item in issues)
     lines.extend(f"ghost: {Path(item).name}" for item in ghosts)
     return _cap_output("\n".join(lines))
+
+
+@mcp.tool()
+def rag_files(
+    action: FilesAction,
+    query: str = "",
+    filename: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> str:
+    """Browse registered KB files through one action-based tool.
+
+    action choices:
+    - list: paged registered filenames using limit/offset
+    - search: filename search using query/limit
+    - read: read one registered KB file using filename
+    """
+    action = str(action).strip().casefold()
+    if action == "list":
+        return rag_list(limit=limit, offset=offset)
+    if action == "search":
+        return rag_search_files(query, limit=limit)
+    if action == "read":
+        return rag_read_file(filename)
+    raise ValueError("unsupported action")
+
+
+@mcp.tool()
+def rag_manage(
+    action: ManageAction,
+    job_id: str = "",
+    topics: list[str] | None = None,
+    expected_fingerprint: str = "",
+) -> str:
+    """Manage deterministic build and caller-assisted index lifecycle.
+
+    action choices:
+    - build_start: start the persistent KB build
+    - build_cancel: cooperatively cancel one build job
+    - index_prepare: return guarded rag_index context for the caller LLM
+    - index_commit: validate caller topics and atomically commit rag_index.json
+    """
+    action = str(action).strip().casefold()
+    if action == "build_start":
+        return build_kb()
+    if action == "build_cancel":
+        return cancel_build(job_id)
+    if action == "index_prepare":
+        return rag_rebuild_index(mode="prepare")
+    if action == "index_commit":
+        return rag_rebuild_index(
+            mode="commit", topics=topics, expected_fingerprint=expected_fingerprint
+        )
+    raise ValueError("unsupported action")
+
+
+@mcp.tool()
+def rag_status(view: StatusView = "health", job_id: str = "") -> str:
+    """Read RAG health or one persistent build-job status through one tool.
+
+    view choices:
+    - health: store/registry/index/pipeline/job health
+    - build: one build job by job_id
+    """
+    view = str(view or "health").strip().casefold()
+    if view == "health":
+        return rag_health()
+    if view == "build":
+        return build_status(job_id)
+    raise ValueError("unsupported view")
 
 
 if __name__ == "__main__":

@@ -11,6 +11,6 @@ Browser ─127.0.0.1:8770─> web_ui.py ├─> MiniLM + BM25 + RRF + registry
 Documents: workspace/knowledge/ (read-only source scope)
 ```
 
-The MCP catalog is: `rag_retrieve`, `rag_list`, `rag_search_files`, `rag_read_file`, `build_kb`, `build_status`, `cancel_build`, `rag_rebuild_index`, `rag_health`.
+The MCP catalog is: `rag_retrieve`, `rag_files` (list/search/read), `rag_manage` (build_start/build_cancel/index_prepare/index_commit), `rag_status` (health/build).
 
 Hard invariants: no backend LLM, no arbitrary filesystem read, no network exposure beyond loopback UI, and no generated state in Git. Run deterministic tests before completion; live client integration is separate.

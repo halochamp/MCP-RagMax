@@ -17,19 +17,11 @@ def _server_module():
     return mcp_server
 
 
-def t_catalog_exposes_nine_bounded_tools():
+def t_catalog_exposes_four_action_based_tools():
     server = _server_module()
     tools = asyncio.run(server.mcp.list_tools())
     assert [item.name for item in tools] == [
-        "rag_retrieve",
-        "rag_list",
-        "rag_search_files",
-        "rag_read_file",
-        "build_kb",
-        "build_status",
-        "cancel_build",
-        "rag_rebuild_index",
-        "rag_health",
+        "rag_retrieve", "rag_files", "rag_manage", "rag_status",
     ]
     by_name = {item.name: item for item in tools}
     schema = by_name["rag_retrieve"].inputSchema
@@ -43,20 +35,19 @@ def t_catalog_exposes_nine_bounded_tools():
         "source_type",
     }
     assert schema["required"] == ["query"]
-    assert by_name["rag_list"].inputSchema.get("required", []) == []
+    assert schema["properties"]["mode"]["enum"] == ["chunks", "files", "source_first"]
     retrieve_description = by_name["rag_retrieve"].description or ""
     assert "SAME question" in retrieve_description
     assert "preserve one intent" in retrieve_description
     assert "Do not add a new subquestion" in retrieve_description
-    assert by_name["rag_search_files"].inputSchema["required"] == ["query"]
-    assert by_name["rag_read_file"].inputSchema["required"] == ["filename"]
-    assert by_name["build_kb"].inputSchema.get("required", []) == []
-    assert by_name["build_status"].inputSchema["required"] == ["job_id"]
-    assert by_name["cancel_build"].inputSchema["required"] == ["job_id"]
-    rebuild_schema = by_name["rag_rebuild_index"].inputSchema
-    assert rebuild_schema.get("required", []) == []
-    assert set(rebuild_schema["properties"]) == {"mode", "topics", "expected_fingerprint"}
-    assert by_name["rag_health"].inputSchema.get("required", []) == []
+    assert by_name["rag_files"].inputSchema["required"] == ["action"]
+    assert by_name["rag_files"].inputSchema["properties"]["action"]["enum"] == ["list", "search", "read"]
+    assert by_name["rag_manage"].inputSchema["required"] == ["action"]
+    assert by_name["rag_manage"].inputSchema["properties"]["action"]["enum"] == [
+        "build_start", "build_cancel", "index_prepare", "index_commit",
+    ]
+    assert by_name["rag_status"].inputSchema.get("required", []) == []
+    assert by_name["rag_status"].inputSchema["properties"]["view"]["enum"] == ["health", "build"]
 
 
 def t_pipe_c_does_not_load_pipe_a_or_llm():
@@ -316,7 +307,9 @@ def t_build_tools_delegate_without_loading_ingestor():
         assert "filenames_json=" in prep
         assert "caller_must_continue=true" in prep
         assert "caller_must_not_answer_before_commit=true" in prep
+        assert "next_tool=rag_manage" in prep
         assert "next_arguments_json=" in prep
+        assert '"action": "index_commit"' in prep
         commit = server.rag_rebuild_index(
             mode="commit",
             topics=["การลงทุน", "ความเสี่ยง"],
@@ -328,6 +321,43 @@ def t_build_tools_delegate_without_loading_ingestor():
     fake_builder.prepare_index_context.assert_called_once_with()
     fake_builder.commit_index.assert_called_once_with(["การลงทุน", "ความเสี่ยง"], "a" * 64)
     assert "ingestor" not in sys.modules
+
+
+def t_action_tools_route_to_existing_contracts():
+    server = _server_module()
+    with mock.patch.object(server, "rag_list", return_value="LIST") as fn:
+        assert server.rag_files("list", limit=7, offset=2) == "LIST"
+        fn.assert_called_once_with(limit=7, offset=2)
+    with mock.patch.object(server, "rag_search_files", return_value="SEARCH") as fn:
+        assert server.rag_files("search", query="needle", limit=4) == "SEARCH"
+        fn.assert_called_once_with("needle", limit=4)
+    with mock.patch.object(server, "rag_read_file", return_value="READ") as fn:
+        assert server.rag_files("read", filename="one.md") == "READ"
+        fn.assert_called_once_with("one.md")
+
+    with mock.patch.object(server, "build_kb", return_value="START") as fn:
+        assert server.rag_manage("build_start") == "START"
+        fn.assert_called_once_with()
+    with mock.patch.object(server, "cancel_build", return_value="CANCEL") as fn:
+        assert server.rag_manage("build_cancel", job_id="build-123456789abc") == "CANCEL"
+        fn.assert_called_once_with("build-123456789abc")
+    with mock.patch.object(server, "rag_rebuild_index", return_value="PREP") as fn:
+        assert server.rag_manage("index_prepare") == "PREP"
+        fn.assert_called_once_with(mode="prepare")
+    with mock.patch.object(server, "rag_rebuild_index", return_value="COMMIT") as fn:
+        assert server.rag_manage(
+            "index_commit", topics=["finance"], expected_fingerprint="a" * 64
+        ) == "COMMIT"
+        fn.assert_called_once_with(
+            mode="commit", topics=["finance"], expected_fingerprint="a" * 64
+        )
+
+    with mock.patch.object(server, "rag_health", return_value="HEALTH") as fn:
+        assert server.rag_status() == "HEALTH"
+        fn.assert_called_once_with()
+    with mock.patch.object(server, "build_status", return_value="STATUS") as fn:
+        assert server.rag_status("build", job_id="build-123456789abc") == "STATUS"
+        fn.assert_called_once_with("build-123456789abc")
 
 
 def t_shared_kb_tools_validate_scope_and_bounds():
@@ -436,20 +466,47 @@ def t_stdio_handshake_lists_pipe_c_without_starting_a_model():
 
     name, tools = asyncio.run(handshake())
     assert name == "MCP-RagMax Pipe C"
-    assert tools == [
-        "rag_retrieve",
-        "rag_list",
-        "rag_search_files",
-        "rag_read_file",
-        "build_kb",
-        "build_status",
-        "cancel_build",
-        "rag_rebuild_index",
-        "rag_health",
+    assert tools == ["rag_retrieve", "rag_files", "rag_manage", "rag_status"]
+
+
+def t_fastmcp_dispatch_rejects_legacy_tools_and_validates_actions():
+    server = _server_module()
+    routes = [
+        ("rag_retrieve", {"query": "same intent"}, "_call_pipe_b"),
+        ("rag_files", {"action": "list"}, "rag_list"),
+        ("rag_files", {"action": "search", "query": "file"}, "rag_search_files"),
+        ("rag_files", {"action": "read", "filename": "one.md"}, "rag_read_file"),
+        ("rag_manage", {"action": "build_start"}, "build_kb"),
+        ("rag_manage", {"action": "build_cancel", "job_id": "build-123"}, "cancel_build"),
+        ("rag_manage", {"action": "index_prepare"}, "rag_rebuild_index"),
+        ("rag_manage", {"action": "index_commit", "topics": ["topic"], "expected_fingerprint": "a" * 64}, "rag_rebuild_index"),
+        ("rag_status", {"view": "health"}, "rag_health"),
+        ("rag_status", {"view": "build", "job_id": "build-123"}, "build_status"),
     ]
+    for name, args, helper in routes:
+        with mock.patch.object(server, helper, return_value="ROUTE_OK") as backend:
+            result = asyncio.run(server.mcp.call_tool(name, args))
+            assert "ROUTE_OK" in str(result)
+            backend.assert_called_once()
+    rejected = [(name, {}) for name in (
+        "rag_list", "rag_search_files", "rag_read_file", "build_kb", "build_status",
+        "cancel_build", "rag_rebuild_index", "rag_health",
+    )] + [
+        ("rag_files", {"action": "unknown"}),
+        ("rag_manage", {}),
+        ("rag_status", {"view": "unknown"}),
+        ("rag_retrieve", {"query": "q", "mode": "unknown"}),
+    ]
+    for name, args in rejected:
+        try:
+            asyncio.run(server.mcp.call_tool(name, args))
+        except Exception as exc:
+            assert "Unknown tool" in str(exc) or "validation error" in str(exc), str(exc)
+        else:
+            raise AssertionError(f"unexpected admission: {name} {args}")
 
 
-r.test("catalog exposes nine bounded tools", t_catalog_exposes_nine_bounded_tools)
+r.test("catalog exposes four action-based tools", t_catalog_exposes_four_action_based_tools)
 r.test("Pipe C does not load Pipe A or its LLM", t_pipe_c_does_not_load_pipe_a_or_llm)
 r.test("Pipe B resolves inside this RAG tree", t_pipe_b_module_resolves_inside_this_rag_tree)
 r.test("valid request delegates to Pipe B", t_delegates_validated_request_to_pipe_b)
@@ -463,6 +520,8 @@ r.test("tiny output cap never overflows", t_tiny_cap_never_exceeds_configured_li
 r.test("output at the cap is unchanged", t_result_at_or_below_cap_is_unchanged)
 r.test("shared KB tools are deterministic and read-only", t_shared_kb_tools_are_deterministic_and_read_only)
 r.test("build tools delegate without loading ingestor", t_build_tools_delegate_without_loading_ingestor)
+r.test("action tools route to existing contracts", t_action_tools_route_to_existing_contracts)
+r.test("FastMCP validates and dispatches only consolidated tools", t_fastmcp_dispatch_rejects_legacy_tools_and_validates_actions)
 r.test("shared KB tools validate scope and bounds", t_shared_kb_tools_validate_scope_and_bounds)
 r.test("Pipe C import graph never loads local LLM modules", t_pipe_c_import_graph_never_loads_local_llm_modules)
 r.test("Pipe B calls are serialized", t_pipe_b_calls_are_serialized)

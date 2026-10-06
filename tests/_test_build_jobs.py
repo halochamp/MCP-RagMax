@@ -133,7 +133,7 @@ def t_worker_completion_does_not_generate_rag_index():
         assert state["status"] == "done"
         assert state["progress_percent"] == 100.0
         assert "stored_chunks=2" in state["summary"]
-        assert "orientation_next=rag_rebuild_index(mode=prepare)" in state["summary"]
+        assert "orientation_next=rag_manage(action=index_prepare)" in state["summary"]
         assert "index_topics=" not in state["summary"]
 
 
@@ -164,6 +164,16 @@ def t_worker_cancel_is_terminal_not_error():
         assert state["error"] == ""
 
 
+def t_job_follow_up_uses_consolidated_tools():
+    import build_jobs
+
+    state = {"status": "running", "job_id": "build-123456789abc"}
+    text = build_jobs._format_job(state)
+    assert "next=rag_status(view=build, job_id=build-123456789abc)" in text
+    assert "cancel=rag_manage(action=build_cancel, job_id=build-123456789abc)" in text
+    assert "next=" not in build_jobs._format_job({**state, "status": "done"})
+
+
 r.test("start returns persistent job id", t_start_returns_persistent_job_id_without_waiting)
 r.test("non-build job kind is rejected", t_non_build_job_kind_is_rejected)
 r.test("active job rejects duplicate start", t_active_job_rejects_duplicate_start)
@@ -171,6 +181,8 @@ r.test("status persists through state file", t_status_survives_process_boundary_
 r.test("cancel writes cooperative marker", t_cancel_build_writes_cooperative_marker)
 r.test("worker completion leaves orientation to caller", t_worker_completion_does_not_generate_rag_index)
 r.test("worker cancellation is terminal not error", t_worker_cancel_is_terminal_not_error)
+
+r.test("job follow-up uses consolidated tools", t_job_follow_up_uses_consolidated_tools)
 
 if __name__ == "__main__":
     r.exit()
